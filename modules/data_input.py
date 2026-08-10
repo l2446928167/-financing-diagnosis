@@ -1,11 +1,13 @@
 """
 模块1：企业数据录入
 支持上传 PDF / Excel / CSV 文件，提取关键财务指标。
+包含规则提取和 LLM 智能提取。
 """
-
 import pandas as pd
 import PyPDF2
 import io
+import re
+import json
 
 def extract_from_csv(file):
     """从CSV文件读取数据框"""
@@ -13,7 +15,6 @@ def extract_from_csv(file):
         df = pd.read_csv(file, encoding="utf-8")
         return df
     except UnicodeDecodeError:
-        # 如果utf-8失败，尝试gbk编码
         file.seek(0)
         df = pd.read_csv(file, encoding="gbk")
         return df
@@ -74,28 +75,25 @@ def auto_extract_metrics(raw_text, df):
 
     # 如果DataFrame存在，尝试从列名匹配
     if df is not None:
-        # 把列名统一转为小写方便匹配
         col_map = {col.lower(): col for col in df.columns}
         for key in metrics:
-            # 简单匹配：比如"总资产"可能对应列名"总资产"或"资产总计"
             possible_names = [key, key.replace("总", ""), key.replace("净", "")]
             for name in possible_names:
                 if name in col_map:
-                    # 取该列第一个非空值
                     val = df[col_map[name]].dropna().iloc[0] if not df[col_map[name]].dropna().empty else ""
                     metrics[key] = str(val)
                     break
 
-    # 如果从PDF提取了文本，尝试用关键词+数字正则提取（简化版，可后续用AI增强）
-if raw_text:
-    import re
-    # 非常基础的提取：找"营业收入"后面的数字（仅示例，实际不准确）
-    for key in metrics:
-        if not metrics[key]:  # 如果DataFrame中没提取到
-            pattern = rf"{key}.*?([0-9,]+\.?\d*)"
-            match = re.search(pattern, raw_text)
-            if match:
-                metrics[key] = match.group(1)
+    # 如果从PDF提取了文本，尝试用关键词+数字正则提取（简化版）
+    if raw_text:
+        for key in metrics:
+            if not metrics[key]:
+                pattern = rf"{key}.*?([0-9,]+\.?\d*)"
+                match = re.search(pattern, raw_text)
+                if match:
+                    metrics[key] = match.group(1)
+
+    return metrics
 
 def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
     """
@@ -104,18 +102,14 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
         raw_text: PDF提取的原始文本
         df: 从CSV/Excel读取的DataFrame
         model_choice, api_key: 模型和密钥
-        call_llm_func: 调用LLM的函数（从外部传入，避免循环导入）
+        call_llm_func: 调用LLM的函数（从外部传入）
     返回：
-        dict: 提取到的指标字典，格式与现有auto_extract_metrics相同
-        如果失败返回None
+        dict: 提取到的指标字典，失败返回None
     """
-    # 准备要发送给LLM的内容
     content = ""
     if raw_text:
-        # 限制长度，防止token超限（视模型上下文长度调整，这里取前4000字符）
         content += "以下是从企业财务报表PDF中提取的文本：\n" + raw_text[:4000]
     if df is not None:
-        # 将DataFrame转为CSV字符串，限制前50行
         csv_str = df.head(50).to_csv(index=False)
         content += "\n以下是从Excel/CSV中读取的表格数据：\n" + csv_str
 
@@ -139,17 +133,13 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
     }
     注意：所有数值请保留原始单位（通常为万元），如果是百分比请保留原样。
     """
-
     user_prompt = content
 
     llm_response = call_llm_func(system_prompt, user_prompt, model_choice, api_key, temperature=0.1, max_tokens=500)
     if not llm_response:
         return None
 
-    # 解析JSON
-    import json
     try:
-        # 尝试提取JSON部分（有时LLM会在前后加说明）
         json_match = re.search(r'\{.*\}', llm_response, re.DOTALL)
         if json_match:
             metrics = json.loads(json_match.group())
@@ -164,4 +154,3 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
     except Exception as e:
         print(f"解析LLM提取结果失败: {e}")
         return None
-return metrics

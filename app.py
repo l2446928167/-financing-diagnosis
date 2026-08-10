@@ -3,7 +3,7 @@ import pandas as pd
 import re
 import os
 from dotenv import load_dotenv, set_key
-from modules.data_input import parse_financial_data, auto_extract_metrics
+from modules.data_input import parse_financial_data, auto_extract_metrics, llm_extract_metrics
 from modules.diagnosis import diagnose
 from modules.product_matching import match_products
 from modules.report_generator import generate_pdf
@@ -117,21 +117,16 @@ if uploaded_file is not None:
     if st.session_state.get('api_key'):
         if st.button("🤖 AI 智能提取财务指标"):
             with st.spinner("AI 正在分析文件内容..."):
-                from utils.llm_helper import call_llm
-                # 导入我们刚写的函数
-                from modules.data_input import llm_extract_metrics
                 ai_metrics = llm_extract_metrics(
                     st.session_state.raw_text,
                     st.session_state.df,
                     st.session_state.get('model', ''),
                     st.session_state.api_key,
-                    call_llm  # 传入函数本身
+                    call_llm
                 )
                 if ai_metrics:
-                    # 更新 session_state 中的指标字典
                     st.session_state.metrics = ai_metrics
                     st.success("AI 提取完成！请检查下方指标并手动修正。")
-                    # 刷新页面以更新输入框的值（通过 rerun）
                     st.rerun()
                 else:
                     st.error("AI 提取失败，请检查 API Key 或文件内容。")
