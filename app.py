@@ -31,7 +31,18 @@ with st.sidebar:
             st.success("API Key 已保存，下次启动自动加载。")
         else:
             st.warning("请先输入 API Key")
-
+    if st.button("🔌 测试 API 连接"):
+        test_res = call_llm(
+            system_prompt="你是一个助手",
+            user_prompt="请回复'连接正常'",
+            model_choice=model,
+            api_key=api_key,
+            max_tokens=20
+        )
+        if test_res:
+            st.success(f"连接成功，返回：{test_res}")
+        else:
+            st.error("连接测试失败，请查看上方错误详情。")
     st.session_state.api_key = api_key
     st.session_state.model = model
 
@@ -118,22 +129,6 @@ if uploaded_file is not None:
         f"调试：API Key 前8位：{st.session_state.get('api_key', '')[:8]}..., 模型：{st.session_state.get('model', '')}")
     if st.session_state.get('api_key'):
         if st.button("🤖 AI 智能提取财务指标"):
-            # 先测试连接
-            test_response = call_llm(
-                "你是一个助手", "请回复 OK",
-                st.session_state.model,
-                st.session_state.api_key,
-                max_tokens=10
-            )
-            if not test_response:
-                st.error("API 连接测试失败，请检查 Key 和网络。")
-            else:
-                st.success(f"连接测试成功，返回：{test_response}")
-                # 然后继续真正的提取...
-
-
-
-
             with st.spinner("AI 正在分析文件内容..."):
                 ai_metrics = llm_extract_metrics(
                     st.session_state.raw_text,
