@@ -103,105 +103,74 @@ def auto_extract_metrics(raw_text, df):
 
 
 def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
-    """
-    使用大模型从原始文本或DataFrame中智能提取财务指标。
-    支持长文本（如200页财报），利用大上下文一次性提取，
-    并引导AI先看目录再定位章节。
-    提供详细的错误提示，方便调试。
-    """
-    # 检查 API Key
+    import streamlit as st
     if not api_key:
-        st.warning("API Key 未填写，无法使用 AI 提取。请在侧边栏输入并保存。")
+        st.warning("API Key 未填写，无法使用 AI 提取。")
         return None
 
-    # 构建要发送的内容
     content = ""
     if raw_text:
-        # 完整传入所有文本，不截断（DeepSeek-V4 支持128K上下文）
-        content += "以下是从企业PDF财报中提取的完整文本（可能很长）：\n" + raw_text.strip()
+        # 缩短截断长度，避免 token 超限（128K token ≈ 8-10万汉字，我们取保守值50000字符）
+        max_chars = 50000
+        if len(raw_text) > max_chars:
+            raw_text = raw_text[:max_chars]
+            st.warning(f"财报文本过长，已截取前 {max_chars} 字符用于提取，可能缺失末尾信息。")
+        content += "以下是从企业PDF财报中提取的文本：\n" + raw_text.strip()
     if df is not None:
         csv_str = df.head(50).to_csv(index=False)
         content += "\n以下是从Excel/CSV中读取的表格数据：\n" + csv_str
 
     if not content.strip():
-        st.warning("没有可提取的文本内容，请检查上传的文件。")
+        st.warning("没有可提取的文本内容。")
         return None
 
-    # 长文本友好提示
     text_length = len(content)
-    if text_length > 50000:
-        st.warning(f"财报文本较长（约{text_length}字符），AI 提取可能需要 10-30 秒，请耐心等待。")
+    if text_length > 30000:
+        st.warning(f"财报文本较长（{text_length}字符），AI 提取可能需要 10-30 秒，请耐心等待。")
 
-    # 系统提示词（目录引导 + 精准提取）
     system_prompt = """
-    你是一位专业的财务数据提取专家，擅长从上市公司年度报告中提取关键财务指标。
-    你将收到一份完整的PDF财报文本，其中可能包含目录、管理层讨论、财务报表附注等大量内容。
-    
-    请按以下步骤完成数据提取任务：
+    你是一位专业的财务数据提取专家。请从提供的企业财务报表文本中，
+    提取以下关键财务指标（以人民币万元为单位，如为百分比则保留原样）。
+    如果找不到，则留空字符串 ""。
 
-    1. 【定位目录】：
-       - 首先在文本中搜索“目录”、“索引”或类似的章节列表，快速了解整个财报的结构。
-       - 找到“合并资产负债表”、“合并利润表”、“主要会计数据及财务指标”等关键章节的位置描述。
-
-    2. 【定位关键章节】：
-       - 根据目录指引，直接跳转到以下章节（通常在财报后三分之一处）：
-         * “合并资产负债表”
-         * “合并利润表”
-         * “主要会计数据及财务指标”（或“近三年主要会计数据和财务指标”）
-         * 如有必要，可参考“财务报表附注”中的相关说明。
-
-    3. 【提取数据】：
-       从上述章节中提取以下指标（均以人民币万元为单位，百分比除外）：
-       - 总资产：取“合并资产负债表”中的“资产总计”（期末余额）
-       - 总负债：取“合并资产负债表”中的“负债合计”（期末余额）
-       - 营业收入：取“合并利润表”中的“营业总收入”（本期金额）
-       - 净利润：取“合并利润表”中的“净利润”（归属于母公司股东的净利润，如无则取“净利润合计”）
-       - 应收账款：取“合并资产负债表”中的“应收账款”（期末余额）
-       - 短期借款：取“合并资产负债表”中的“短期借款”（期末余额）
-       - 流动比率：如表中已给出则直接使用，否则用流动资产÷流动负债计算
-       - 资产负债率：如表中已给出则直接使用，否则用总负债÷总资产×100% 计算
-
-    4. 【输出格式】：
-       请严格按照以下 JSON 格式输出，不要包含任何解释、说明或markdown标记，仅输出 JSON 对象：
-       {
-           "总资产": "数值（万元）",
-           "总负债": "数值（万元）",
-           "营业收入": "数值（万元）",
-           "净利润": "数值（万元）",
-           "应收账款": "数值（万元）",
-           "短期借款": "数值（万元）",
-           "流动比率": "数值（如1.5）",
-           "资产负债率": "数值（如65.2%）"
-       }
-
-    注意：
-    - 数字中可能含有千分位逗号，请去除后填入。
-    - 如果找不到某个指标，该字段值留空字符串 ""。
-    - 确保提取的数据来源正确，不要被管理层讨论中的预估值或去年数据误导。
+    请严格按照以下 JSON 格式输出，不要包含任何解释或markdown：
+    {
+        "总资产": "数值（万元）",
+        "总负债": "数值（万元）",
+        "营业收入": "数值（万元）",
+        "净利润": "数值（万元）",
+        "应收账款": "数值（万元）",
+        "短期借款": "数值（万元）",
+        "流动比率": "数值（如1.5）",
+        "资产负债率": "数值（如65.2%）"
+    }
     """
     user_prompt = content
 
-    # 调用 LLM
-    llm_response = call_llm_func(system_prompt, user_prompt, model_choice, api_key, temperature=0.1, max_tokens=800)
-    if not llm_response:
-        st.error("LLM 调用未返回结果，请检查 API Key 是否有效、网络是否正常，或查看终端详细日志。")
+    # 调用 LLM，并捕获可能的异常（虽然 call_llm 内部已处理，但这里再保险一次）
+    try:
+        llm_response = call_llm_func(system_prompt, user_prompt, model_choice, api_key, temperature=0.1, max_tokens=800)
+    except Exception as e:
+        st.error(f"调用 LLM 时发生异常：{e}")
         return None
 
-    # 解析 JSON 结果
+    if not llm_response:
+        st.error("LLM 未返回结果。可能原因：文本过长导致 token 超限，请尝试上传更小的文件；或 API 暂时不可用。")
+        return None
+
+    # 解析 JSON
+    import json, re
     try:
-        # 提取 JSON 部分
         json_match = re.search(r'\{.*\}', llm_response, re.DOTALL)
         if json_match:
             metrics = json.loads(json_match.group())
         else:
             metrics = json.loads(llm_response)
-
         expected_keys = ["总资产", "总负债", "营业收入", "净利润", "应收账款", "短期借款", "流动比率", "资产负债率"]
         for k in expected_keys:
             if k not in metrics:
                 metrics[k] = ""
-
         return metrics
     except Exception as e:
-        st.error(f"AI 提取失败，解析返回结果时出错：{e}\n\n原始返回内容：\n{llm_response[:500]}...")
+        st.error(f"解析 AI 返回结果失败：{e}\n\n原始返回内容：\n{llm_response[:500]}...")
         return None
