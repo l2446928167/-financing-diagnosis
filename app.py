@@ -32,17 +32,24 @@ with st.sidebar:
         else:
             st.warning("请先输入 API Key")
     if st.button("🔌 测试 API 连接"):
-        test_res = call_llm(
-            system_prompt="你是一个助手",
-            user_prompt="请回复'连接正常'",
-            model_choice=model,
-            api_key=api_key,
-            max_tokens=20
-        )
-        if test_res:
-            st.success(f"连接成功，返回：{test_res}")
-        else:
-            st.error("连接测试失败，请查看上方错误详情。")
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+            response = client.chat.completions.create(
+                model="deepseek-v4-flash",
+                messages=[
+                    {"role": "system", "content": "你是一个助手"},
+                    {"role": "user", "content": "回复OK"}
+                ],
+                max_tokens=10,
+                reasoning_effort="high",
+                extra_body={"thinking": {"type": "enabled"}}
+            )
+            st.success(f"连接成功！返回：{response.choices[0].message.content}")
+        except Exception as e:
+            st.error(f"测试失败：{type(e).__name__} – {e}")
+            import traceback
+            st.text_area("详细错误", traceback.format_exc(), height=200)
     st.session_state.api_key = api_key
     st.session_state.model = model
 
