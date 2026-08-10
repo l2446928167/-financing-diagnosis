@@ -114,6 +114,8 @@ if uploaded_file is not None:
     st.session_state.metrics = updated_metrics
 
     # 添加 AI 智能提取按钮（如果已配置 API Key）
+    st.write(
+        f"调试：API Key 前8位：{st.session_state.get('api_key', '')[:8]}..., 模型：{st.session_state.get('model', '')}")
     if st.session_state.get('api_key'):
         if st.button("🤖 AI 智能提取财务指标"):
             with st.spinner("AI 正在分析文件内容..."):
@@ -137,8 +139,15 @@ if uploaded_file is not None:
         if st.session_state.df is not None:
             st.dataframe(st.session_state.df)
         if st.session_state.raw_text:
+            # 显示前 10000 字符，并提供下载完整文本
             text = st.session_state.raw_text
-            st.text(text[:2000] + "..." if len(text) > 2000 else text)
+            st.text_area("提取的文本（前10000字符）", text[:10000], height=300)
+            st.download_button(
+                label="📥 下载完整原始文本",
+                data=text,
+                file_name="raw_text.txt",
+                mime="text/plain"
+            )
 
     # 补充经营信息
     st.subheader("📝 补充经营信息")

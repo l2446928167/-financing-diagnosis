@@ -1,13 +1,15 @@
 """
 模块1：企业数据录入
 支持上传 PDF / Excel / CSV 文件，提取关键财务指标。
-包含规则提取和 LLM 智能提取（支持长文本、目录引导）。
+包含规则提取和 LLM 智能提取（支持长文本、目录引导、详细错误提示）。
 """
 import pandas as pd
 import PyPDF2
 import io
 import re
 import json
+import streamlit as st
+
 
 def extract_from_csv(file):
     """从CSV文件读取数据框"""
@@ -19,13 +21,15 @@ def extract_from_csv(file):
         df = pd.read_csv(file, encoding="gbk")
         return df
 
+
 def extract_from_excel(file):
     """从Excel文件读取第一个工作表"""
     df = pd.read_excel(file, engine="openpyxl")
     return df
 
+
 def extract_from_pdf(file):
-    """从PDF文件提取文本（简单提取所有文字）"""
+    """从PDF文件提取全部文本（所有页）"""
     pdf_reader = PyPDF2.PdfReader(file)
     text = ""
     for page in pdf_reader.pages:
@@ -33,6 +37,7 @@ def extract_from_pdf(file):
         if page_text:
             text += page_text + "\n"
     return text
+
 
 def parse_financial_data(uploaded_file):
     """
@@ -56,10 +61,11 @@ def parse_financial_data(uploaded_file):
 
     return raw_text, df
 
+
 def auto_extract_metrics(raw_text, df):
     """
     从原始文本或DataFrame中自动提取常见财务指标。
-    用简单的关键词匹配，适合快速预览。
+    使用简单的关键词匹配，适合快速预览。
     返回一个字典，包含指标名和提取到的值（字符串）。
     """
     metrics = {
@@ -95,12 +101,20 @@ def auto_extract_metrics(raw_text, df):
 
     return metrics
 
+
 def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
     """
     使用大模型从原始文本或DataFrame中智能提取财务指标。
     支持长文本（如200页财报），利用大上下文一次性提取，
     并引导AI先看目录再定位章节。
+    提供详细的错误提示，方便调试。
     """
+    # 检查 API Key
+    if not api_key:
+        st.warning("API Key 未填写，无法使用 AI 提取。请在侧边栏输入并保存。")
+        return None
+
+    # 构建要发送的内容
     content = ""
     if raw_text:
         # 完整传入所有文本，不截断（DeepSeek-V4 支持128K上下文）
@@ -110,14 +124,15 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
         content += "\n以下是从Excel/CSV中读取的表格数据：\n" + csv_str
 
     if not content.strip():
+        st.warning("没有可提取的文本内容，请检查上传的文件。")
         return None
 
     # 长文本友好提示
     text_length = len(content)
     if text_length > 50000:
-        import streamlit as st
         st.warning(f"财报文本较长（约{text_length}字符），AI 提取可能需要 10-30 秒，请耐心等待。")
 
+    # 系统提示词（目录引导 + 精准提取）
     system_prompt = """
     你是一位专业的财务数据提取专家，擅长从上市公司年度报告中提取关键财务指标。
     你将收到一份完整的PDF财报文本，其中可能包含目录、管理层讨论、财务报表附注等大量内容。
@@ -166,10 +181,13 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
     """
     user_prompt = content
 
+    # 调用 LLM
     llm_response = call_llm_func(system_prompt, user_prompt, model_choice, api_key, temperature=0.1, max_tokens=800)
     if not llm_response:
+        st.error("LLM 调用未返回结果，请检查 API Key 是否有效、网络是否正常，或查看终端详细日志。")
         return None
 
+    # 解析 JSON 结果
     try:
         # 提取 JSON 部分
         json_match = re.search(r'\{.*\}', llm_response, re.DOTALL)
@@ -177,12 +195,13 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
             metrics = json.loads(json_match.group())
         else:
             metrics = json.loads(llm_response)
-        # 确保所有键都存在
+
         expected_keys = ["总资产", "总负债", "营业收入", "净利润", "应收账款", "短期借款", "流动比率", "资产负债率"]
         for k in expected_keys:
             if k not in metrics:
                 metrics[k] = ""
+
         return metrics
     except Exception as e:
-        print(f"解析LLM提取结果失败: {e}")
+        st.error(f"AI 提取失败，解析返回结果时出错：{e}\n\n原始返回内容：\n{llm_response[:500]}...")
         return None
