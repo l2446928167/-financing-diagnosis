@@ -18,18 +18,24 @@ def call_llm(system_prompt, user_prompt, model_choice, api_key, temperature=0.3,
     base_url, model_name = config
     try:
         client = OpenAI(api_key=api_key, base_url=base_url)
-        # 最简请求，不加任何扩展参数
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[
+
+        request_params = {
+            "model": model_name,
+            "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=temperature,
-            max_tokens=max_tokens
-        )
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        }
+
+        # DeepSeek-V4-Flash 必需参数
+        if model_choice == "DeepSeek-V4-Flash":
+            request_params["reasoning_effort"] = "high"
+            request_params["extra_body"] = {"thinking": {"type": "enabled"}}
+
+        response = client.chat.completions.create(**request_params)
         return response.choices[0].message.content.strip()
     except Exception as e:
-        # 把完整错误显示在页面上，方便排查
         st.error(f"大模型调用失败：{e}")
         return None
