@@ -1,7 +1,7 @@
 """
 模块1：企业数据录入
 支持上传 PDF / Excel / CSV 文件，提取关键财务指标。
-包含规则提取和 LLM 智能提取。
+包含规则提取和 LLM 智能提取（支持长文本、目录引导）。
 """
 import pandas as pd
 import PyPDF2
@@ -59,7 +59,7 @@ def parse_financial_data(uploaded_file):
 def auto_extract_metrics(raw_text, df):
     """
     从原始文本或DataFrame中自动提取常见财务指标。
-    目前用简单的关键词匹配（未来可接入大模型做更智能提取）。
+    用简单的关键词匹配，适合快速预览。
     返回一个字典，包含指标名和提取到的值（字符串）。
     """
     metrics = {
@@ -98,17 +98,13 @@ def auto_extract_metrics(raw_text, df):
 def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
     """
     使用大模型从原始文本或DataFrame中智能提取财务指标。
-    参数：
-        raw_text: PDF提取的原始文本
-        df: 从CSV/Excel读取的DataFrame
-        model_choice, api_key: 模型和密钥
-        call_llm_func: 调用LLM的函数（从外部传入）
-    返回：
-        dict: 提取到的指标字典，失败返回None
+    支持长文本（如200页财报），利用大上下文一次性提取，
+    并引导AI先看目录再定位章节。
     """
     content = ""
     if raw_text:
-        content += "以下是从企业财务报表PDF中提取的文本：\n" + raw_text[:4000]
+        # 完整传入所有文本，不截断（DeepSeek-V4 支持128K上下文）
+        content += "以下是从企业PDF财报中提取的完整文本（可能很长）：\n" + raw_text.strip()
     if df is not None:
         csv_str = df.head(50).to_csv(index=False)
         content += "\n以下是从Excel/CSV中读取的表格数据：\n" + csv_str
@@ -116,36 +112,72 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
     if not content.strip():
         return None
 
+    # 长文本友好提示
+    text_length = len(content)
+    if text_length > 50000:
+        import streamlit as st
+        st.warning(f"财报文本较长（约{text_length}字符），AI 提取可能需要 10-30 秒，请耐心等待。")
+
     system_prompt = """
-    你是一位专业的财务数据提取专家。请从提供的企业财务文本或表格中，
-    提取以下关键财务指标（如果找不到，则留空字符串）。
-    请严格按照JSON格式输出，不要包含任何其他文字。
-    指标包括：
-    {
-        "总资产": "",
-        "总负债": "",
-        "营业收入": "",
-        "净利润": "",
-        "应收账款": "",
-        "短期借款": "",
-        "流动比率": "",
-        "资产负债率": ""
-    }
-    注意：所有数值请保留原始单位（通常为万元），如果是百分比请保留原样。
+    你是一位专业的财务数据提取专家，擅长从上市公司年度报告中提取关键财务指标。
+    你将收到一份完整的PDF财报文本，其中可能包含目录、管理层讨论、财务报表附注等大量内容。
+    
+    请按以下步骤完成数据提取任务：
+
+    1. 【定位目录】：
+       - 首先在文本中搜索“目录”、“索引”或类似的章节列表，快速了解整个财报的结构。
+       - 找到“合并资产负债表”、“合并利润表”、“主要会计数据及财务指标”等关键章节的位置描述。
+
+    2. 【定位关键章节】：
+       - 根据目录指引，直接跳转到以下章节（通常在财报后三分之一处）：
+         * “合并资产负债表”
+         * “合并利润表”
+         * “主要会计数据及财务指标”（或“近三年主要会计数据和财务指标”）
+         * 如有必要，可参考“财务报表附注”中的相关说明。
+
+    3. 【提取数据】：
+       从上述章节中提取以下指标（均以人民币万元为单位，百分比除外）：
+       - 总资产：取“合并资产负债表”中的“资产总计”（期末余额）
+       - 总负债：取“合并资产负债表”中的“负债合计”（期末余额）
+       - 营业收入：取“合并利润表”中的“营业总收入”（本期金额）
+       - 净利润：取“合并利润表”中的“净利润”（归属于母公司股东的净利润，如无则取“净利润合计”）
+       - 应收账款：取“合并资产负债表”中的“应收账款”（期末余额）
+       - 短期借款：取“合并资产负债表”中的“短期借款”（期末余额）
+       - 流动比率：如表中已给出则直接使用，否则用流动资产÷流动负债计算
+       - 资产负债率：如表中已给出则直接使用，否则用总负债÷总资产×100% 计算
+
+    4. 【输出格式】：
+       请严格按照以下 JSON 格式输出，不要包含任何解释、说明或markdown标记，仅输出 JSON 对象：
+       {
+           "总资产": "数值（万元）",
+           "总负债": "数值（万元）",
+           "营业收入": "数值（万元）",
+           "净利润": "数值（万元）",
+           "应收账款": "数值（万元）",
+           "短期借款": "数值（万元）",
+           "流动比率": "数值（如1.5）",
+           "资产负债率": "数值（如65.2%）"
+       }
+
+    注意：
+    - 数字中可能含有千分位逗号，请去除后填入。
+    - 如果找不到某个指标，该字段值留空字符串 ""。
+    - 确保提取的数据来源正确，不要被管理层讨论中的预估值或去年数据误导。
     """
     user_prompt = content
 
-    llm_response = call_llm_func(system_prompt, user_prompt, model_choice, api_key, temperature=0.1, max_tokens=500)
+    llm_response = call_llm_func(system_prompt, user_prompt, model_choice, api_key, temperature=0.1, max_tokens=800)
     if not llm_response:
         return None
 
     try:
+        # 提取 JSON 部分
         json_match = re.search(r'\{.*\}', llm_response, re.DOTALL)
         if json_match:
             metrics = json.loads(json_match.group())
         else:
             metrics = json.loads(llm_response)
-        # 确保所有键存在
+        # 确保所有键都存在
         expected_keys = ["总资产", "总负债", "营业收入", "净利润", "应收账款", "短期借款", "流动比率", "资产负债率"]
         for k in expected_keys:
             if k not in metrics:
