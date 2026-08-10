@@ -113,6 +113,31 @@ if uploaded_file is not None:
             )
     st.session_state.metrics = updated_metrics
 
+    # 添加 AI 智能提取按钮（如果已配置 API Key）
+    if st.session_state.get('api_key'):
+        if st.button("🤖 AI 智能提取财务指标"):
+            with st.spinner("AI 正在分析文件内容..."):
+                from utils.llm_helper import call_llm
+                # 导入我们刚写的函数
+                from modules.data_input import llm_extract_metrics
+                ai_metrics = llm_extract_metrics(
+                    st.session_state.raw_text,
+                    st.session_state.df,
+                    st.session_state.get('model', ''),
+                    st.session_state.api_key,
+                    call_llm  # 传入函数本身
+                )
+                if ai_metrics:
+                    # 更新 session_state 中的指标字典
+                    st.session_state.metrics = ai_metrics
+                    st.success("AI 提取完成！请检查下方指标并手动修正。")
+                    # 刷新页面以更新输入框的值（通过 rerun）
+                    st.rerun()
+                else:
+                    st.error("AI 提取失败，请检查 API Key 或文件内容。")
+    else:
+        st.info("💡 在侧边栏配置 API Key 后可使用 AI 智能提取财务指标。")
+
     with st.expander("查看原始解析数据"):
         if st.session_state.df is not None:
             st.dataframe(st.session_state.df)
