@@ -1,7 +1,7 @@
 """
 模块1：企业数据录入
 支持上传 PDF / Excel / CSV 文件，提取关键财务指标。
-包含规则提取和 LLM 智能提取（支持长文本、目录引导、详细错误提示）。
+包含规则提取和 LLM 智能提取（分块处理长文本、目录引导、详细错误提示）。
 """
 import pandas as pd
 import PyPDF2
@@ -102,10 +102,34 @@ def auto_extract_metrics(raw_text, df):
     return metrics
 
 
-def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
-    import streamlit as st
-    import json, re
+def parse_metrics_response(text):
+    """辅助函数：从LLM返回的文本中解析出财务指标字典"""
+    if not text:
+        return None
+    try:
+        json_match = re.search(r'\{.*\}', text, re.DOTALL)
+        if json_match:
+            metrics = json.loads(json_match.group())
+        else:
+            metrics = json.loads(text)
+        expected_keys = ["总资产", "总负债", "营业收入", "净利润", "应收账款", "短期借款", "流动比率", "资产负债率"]
+        for k in expected_keys:
+            if k not in metrics:
+                metrics[k] = ""
+        return metrics
+    except Exception as e:
+        st.error(f"解析指标失败: {e}\n原始返回: {text[:300]}")
+        return None
 
+
+def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
+    """
+    使用大模型从原始文本或DataFrame中智能提取财务指标。
+    支持长文本分块处理：
+    1. 优先处理Excel/CSV表格
+    2. 短文本直接提取
+    3. 长文本分块提取摘要 → 合并浓缩 → 最终提取
+    """
     if not api_key:
         st.warning("API Key 未填写，无法使用 AI 提取。")
         return None
@@ -202,24 +226,4 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
         return parse_metrics_response(final_resp)
     else:
         st.error("最终提取失败，大模型未返回有效结果。请检查上方是否有红色错误提示。")
-        return None
-
-def parse_metrics_response(text):
-    import streamlit as st
-    import json, re
-    if not text:
-        return None
-    try:
-        json_match = re.search(r'\{.*\}', text, re.DOTALL)
-        if json_match:
-            metrics = json.loads(json_match.group())
-        else:
-            metrics = json.loads(text)
-        expected = ["总资产","总负债","营业收入","净利润","应收账款","短期借款","流动比率","资产负债率"]
-        for k in expected:
-            if k not in metrics:
-                metrics[k] = ""
-        return metrics
-    except Exception as e:
-        st.error(f"解析指标失败: {e}\n原始返回: {text[:300]}")
         return None
