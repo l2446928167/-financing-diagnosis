@@ -118,6 +118,22 @@ if uploaded_file is not None:
         f"调试：API Key 前8位：{st.session_state.get('api_key', '')[:8]}..., 模型：{st.session_state.get('model', '')}")
     if st.session_state.get('api_key'):
         if st.button("🤖 AI 智能提取财务指标"):
+            # 先测试连接
+            test_response = call_llm(
+                "你是一个助手", "请回复 OK",
+                st.session_state.model,
+                st.session_state.api_key,
+                max_tokens=10
+            )
+            if not test_response:
+                st.error("API 连接测试失败，请检查 Key 和网络。")
+            else:
+                st.success(f"连接测试成功，返回：{test_response}")
+                # 然后继续真正的提取...
+
+
+
+
             with st.spinner("AI 正在分析文件内容..."):
                 ai_metrics = llm_extract_metrics(
                     st.session_state.raw_text,
