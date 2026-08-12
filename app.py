@@ -9,7 +9,6 @@ load_dotenv()
 saved_api_key = os.environ.get("DEEPSEEK_API_KEY", "")
 
 st.set_page_config(page_title="小微企业融资诊断工具", layout="wide")
-
 st.title("🏦 AI + 小微企业融资诊断系统")
 st.markdown("上传企业财务数据，获取健康诊断与信贷产品匹配建议。")
 
@@ -30,19 +29,26 @@ with st.sidebar:
     st.session_state.api_key = api_key
     st.session_state.model = model
 
-    # 测试 API 连接按钮（方便调试）
+    # 测试 API 连接按钮
     if st.button("🔌 测试 API 连接"):
         try:
             from openai import OpenAI
-            client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+            import httpx
+            client = OpenAI(
+                api_key=api_key,
+                base_url="https://api.deepseek.com",
+                timeout=httpx.Timeout(30.0, connect=10.0)
+            )
             response = client.chat.completions.create(
                 model="deepseek-v4-flash",
-                messages=[{"role": "system", "content": "You are a helper."}, {"role": "user", "content": "回复OK"}],
-                max_tokens=10,
-                reasoning_effort="high",
-                extra_body={"thinking": {"type": "enabled"}}
+                messages=[
+                    {"role": "system", "content": "You are a helper."},
+                    {"role": "user", "content": "回复OK"}
+                ],
+                max_tokens=10
             )
-            st.success(f"连接成功！返回：{response.choices[0].message.content}")
+            content = response.choices[0].message.content
+            st.success(f"连接成功！返回：{content}")
         except Exception as e:
             st.error(f"测试失败：{type(e).__name__} – {e}")
 
@@ -60,6 +66,7 @@ if "diagnosis_result" not in st.session_state:
 def generate_diagnosis_text(full_metrics, dims, overall, model_choice, api_key):
     """用 LLM 生成诊断总结、风险点、改善建议，失败返回 None"""
     from utils.llm_helper import call_llm
+
     system_prompt = """
     你是一位资深的小微企业融资顾问。根据提供的企业财务指标和5维度健康评分，
     请输出以下内容（用中文）：
@@ -98,18 +105,22 @@ def generate_diagnosis_text(full_metrics, dims, overall, model_choice, api_key):
 
 # ======================== 模块1：数据录入 ========================
 st.header("📤 第一步：上传企业财务数据")
+
 uploaded_file = st.file_uploader("支持 PDF / Excel / CSV 格式", type=["pdf", "xlsx", "xls", "csv"])
 
 if uploaded_file is not None:
     # 导入数据解析模块
     from modules.data_input import parse_financial_data, auto_extract_metrics
+
     with st.spinner("正在解析文件..."):
         try:
             raw_text, df = parse_financial_data(uploaded_file)
             st.session_state.raw_text = raw_text
             st.session_state.df = df
-            extracted = auto_extract_metrics(raw_text, df)
-            st.session_state.metrics = extracted
+            # 如果 AI 已提取过指标，不覆盖（防止 rerun 时被正则结果冲掉）
+            if "ai_extracted" not in st.session_state:
+                extracted = auto_extract_metrics(raw_text, df)
+                st.session_state.metrics = extracted
             st.success("文件解析完成！")
         except Exception as e:
             st.error(f"解析失败：{e}")
@@ -129,7 +140,7 @@ if uploaded_file is not None:
             )
     st.session_state.metrics = updated_metrics
 
-    # AI 智能提取按钮（容错增强）
+    # AI 智能提取按钮
     if st.session_state.get('api_key'):
         if st.button("🤖 AI 智能提取财务指标"):
             with st.spinner("AI 正在分析文件内容..."):
@@ -145,6 +156,7 @@ if uploaded_file is not None:
                     )
                     if ai_metrics:
                         st.session_state.metrics = ai_metrics
+                        st.session_state.ai_extracted = True  # 标记已AI提取，rerun后不覆盖
                         st.success("AI 提取完成！")
                         st.rerun()
                     else:
@@ -280,6 +292,7 @@ if uploaded_file is not None:
                     st.markdown(f"- {risk}")
             else:
                 st.success("未发现明显风险点。")
+
             st.subheader("💡 改善行动建议")
             for sug in result['suggestions']:
                 st.markdown(f"- {sug}")
@@ -363,16 +376,19 @@ if uploaded_file is not None:
         # ======================== 报告下载 ========================
         st.markdown("---")
         st.header("📄 下载诊断报告")
+
         try:
             df_all = pd.read_csv(product_path, encoding="utf-8")
 
             ai_summary_text = ""
             ai_risks_text = ""
             ai_suggestions_text = ""
+
             if llm_text:
                 overall_match = re.search(r'【总体评价】\s*(.*?)\s*【风险点】', llm_text, re.DOTALL)
                 risks_match = re.search(r'【风险点】\s*(.*?)\s*【改善建议】', llm_text, re.DOTALL)
                 suggestions_match = re.search(r'【改善建议】\s*(.*)', llm_text, re.DOTALL)
+
                 if overall_match:
                     ai_summary_text = overall_match.group(1).strip()
                 if risks_match:
@@ -408,5 +424,4 @@ try:
     st.dataframe(df_all, width='stretch')
 except Exception as e:
     st.error(f"产品库加载失败：{e}")
-
 st.caption("数据来源：各银行官网，采集日期见表中字段。")
