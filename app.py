@@ -4,7 +4,7 @@ import re
 import os
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "v1.3 (2026-08-12)"
+APP_VERSION = "v1.3.1 (2026-08-12)"
 
 # 加载 .env（用于本地保存 API Key）
 load_dotenv()
