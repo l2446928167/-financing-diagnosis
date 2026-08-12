@@ -3,13 +3,8 @@ import pandas as pd
 import re
 import os
 from dotenv import load_dotenv, set_key
-from modules.data_input import parse_financial_data, auto_extract_metrics, llm_extract_metrics
-from modules.diagnosis import diagnose
-from modules.product_matching import match_products
-from modules.report_generator import generate_pdf
-from utils.llm_helper import call_llm
 
-# 加载 .env 中的环境变量
+# 加载 .env
 load_dotenv()
 saved_api_key = os.environ.get("DEEPSEEK_API_KEY", "")
 
@@ -31,16 +26,18 @@ with st.sidebar:
             st.success("API Key 已保存，下次启动自动加载。")
         else:
             st.warning("请先输入 API Key")
+
+    st.session_state.api_key = api_key
+    st.session_state.model = model
+
+    # 测试 API 连接按钮
     if st.button("🔌 测试 API 连接"):
         try:
             from openai import OpenAI
             client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
             response = client.chat.completions.create(
                 model="deepseek-v4-flash",
-                messages=[
-                    {"role": "system", "content": "你是一个助手"},
-                    {"role": "user", "content": "回复OK"}
-                ],
+                messages=[{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": "回复OK"}],
                 max_tokens=10,
                 reasoning_effort="high",
                 extra_body={"thinking": {"type": "enabled"}}
@@ -48,10 +45,6 @@ with st.sidebar:
             st.success(f"连接成功！返回：{response.choices[0].message.content}")
         except Exception as e:
             st.error(f"测试失败：{type(e).__name__} – {e}")
-            import traceback
-            st.text_area("详细错误", traceback.format_exc(), height=200)
-    st.session_state.api_key = api_key
-    st.session_state.model = model
 
 # ---------- 初始化 session_state ----------
 if "metrics" not in st.session_state:
@@ -63,8 +56,9 @@ if "df" not in st.session_state:
 if "diagnosis_result" not in st.session_state:
     st.session_state.diagnosis_result = None
 
-# ---------- 辅助函数：用LLM生成诊断文本 ----------
+# ---------- 辅助函数 ----------
 def generate_diagnosis_text(full_metrics, dims, overall, model_choice, api_key):
+    from utils.llm_helper import call_llm
     system_prompt = """
     你是一位资深的小微企业融资顾问。根据提供的企业财务指标和5维度健康评分，
     请输出以下内容（用中文）：
@@ -106,6 +100,7 @@ st.header("📤 第一步：上传企业财务数据")
 uploaded_file = st.file_uploader("支持 PDF / Excel / CSV 格式", type=["pdf", "xlsx", "xls", "csv"])
 
 if uploaded_file is not None:
+    from modules.data_input import parse_financial_data, auto_extract_metrics
     with st.spinner("正在解析文件..."):
         try:
             raw_text, df = parse_financial_data(uploaded_file)
@@ -131,25 +126,25 @@ if uploaded_file is not None:
             )
     st.session_state.metrics = updated_metrics
 
-    # 添加 AI 智能提取按钮（如果已配置 API Key）
-    st.write(
-        f"调试：API Key 前8位：{st.session_state.get('api_key', '')[:8]}..., 模型：{st.session_state.get('model', '')}")
+    # AI 智能提取按钮
     if st.session_state.get('api_key'):
         if st.button("🤖 AI 智能提取财务指标"):
+            from modules.data_input import llm_extract_metrics
+            from utils.llm_helper import call_llm
             with st.spinner("AI 正在分析文件内容..."):
                 ai_metrics = llm_extract_metrics(
                     st.session_state.raw_text,
                     st.session_state.df,
-                    st.session_state.get('model', ''),
+                    st.session_state.model,
                     st.session_state.api_key,
                     call_llm
                 )
                 if ai_metrics:
                     st.session_state.metrics = ai_metrics
-                    st.success("AI 提取完成！请检查下方指标并手动修正。")
+                    st.success("AI 提取完成！")
                     st.rerun()
                 else:
-                    st.error("AI 提取失败，请检查 API Key 或文件内容。")
+                    st.error("AI 提取失败，请查看上方错误信息。")
     else:
         st.info("💡 在侧边栏配置 API Key 后可使用 AI 智能提取财务指标。")
 
@@ -157,7 +152,6 @@ if uploaded_file is not None:
         if st.session_state.df is not None:
             st.dataframe(st.session_state.df)
         if st.session_state.raw_text:
-            # 显示前 10000 字符，并提供下载完整文本
             text = st.session_state.raw_text
             st.text_area("提取的文本（前10000字符）", text[:10000], height=300)
             st.download_button(
@@ -191,6 +185,11 @@ if uploaded_file is not None:
 
     # ===================== 诊断按钮 =====================
     if st.button("🔍 开始金融健康诊断", type="primary"):
+        from modules.diagnosis import diagnose
+        from modules.product_matching import match_products
+        from modules.report_generator import generate_pdf
+        from utils.llm_helper import call_llm
+
         full_metrics = {
             **st.session_state.metrics,
             "经营年限": operating_years,
@@ -228,11 +227,11 @@ if uploaded_file is not None:
                 st.metric(dim, f"{dims[dim]}/10")
                 st.markdown(lights[dim])
 
-        # LLM 增强诊断文本
+        # LLM 诊断文本
         llm_text = generate_diagnosis_text(
             full_metrics, dims, result['overall_score'],
-            st.session_state.get('model', ''),
-            st.session_state.get('api_key', '')
+            st.session_state.model,
+            st.session_state.api_key
         )
 
         if llm_text:
@@ -278,7 +277,7 @@ if uploaded_file is not None:
 
         st.caption("以上诊断基于规则引擎与AI生成内容，仅供参考，不构成金融建议。")
 
-        # ===================== 产品匹配 =====================
+        # 产品匹配
         st.markdown("---")
         st.header("🏦 匹配银行信贷产品")
 
@@ -322,8 +321,8 @@ if uploaded_file is not None:
                     """
                     rec_system = "你是资深小微企业信贷顾问，语言简洁专业，用'建议'而非'你应该'。"
                     ai_rec = call_llm(rec_system, rec_prompt,
-                                     st.session_state.get('model', ''),
-                                     st.session_state.get('api_key', ''),
+                                     st.session_state.model,
+                                     st.session_state.api_key,
                                      max_tokens=500)
                     if ai_rec:
                         ai_recommendation_text = ai_rec
@@ -342,8 +341,8 @@ if uploaded_file is not None:
                     """
                     advice_system = "你是小微企业融资改善顾问，给出可操作的建议。"
                     ai_advice = call_llm(advice_system, advice_prompt,
-                                         st.session_state.get('model', ''),
-                                         st.session_state.get('api_key', ''),
+                                         st.session_state.model,
+                                         st.session_state.api_key,
                                          max_tokens=400)
                     if ai_advice:
                         ai_recommendation_text = ai_advice
@@ -352,7 +351,7 @@ if uploaded_file is not None:
         except Exception as e:
             st.error(f"产品匹配出错：{e}")
 
-        # ===================== 报告下载 =====================
+        # 报告下载
         st.markdown("---")
         st.header("📄 下载诊断报告")
         try:
@@ -391,17 +390,12 @@ if uploaded_file is not None:
 else:
     st.info("👆 请上传企业的财务报表、银行流水或应收账款明细。")
 
-# ===================== 底部产品库展示 =====================
+# 底部产品库
 st.markdown("---")
 st.header("📋 银行信贷产品库（所有产品）")
-product_path = "knowledge/bank_products/products.csv"
 try:
-    df_all = pd.read_csv(product_path, encoding="utf-8")
+    df_all = pd.read_csv("knowledge/bank_products/products.csv", encoding="utf-8")
     st.success(f"✅ 已加载 {len(df_all)} 条产品数据")
     st.dataframe(df_all, use_container_width=True)
-except FileNotFoundError:
-    st.error("❌ 未找到产品库文件，请检查 knowledge/bank_products/products.csv 是否存在")
-except Exception as e:
-    st.error(f"❌ 读取产品库出错：{e}")
-
-st.caption("数据来源：各银行官网，采集日期见表中字段。")
+except:
+    st.error("产品库加载失败")
