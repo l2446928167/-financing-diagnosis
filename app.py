@@ -20,9 +20,13 @@ with st.sidebar:
 
     if st.button("💾 保存 API Key 到本地"):
         if api_key:
-            env_path = os.path.join(os.path.dirname(__file__), ".env")
-            set_key(env_path, "DEEPSEEK_API_KEY", api_key)
-            st.success("API Key 已保存，下次启动自动加载。")
+            try:
+                env_path = os.path.join(os.path.dirname(__file__), ".env")
+                set_key(env_path, "DEEPSEEK_API_KEY", api_key)
+                st.success("API Key 已保存，下次启动自动加载。")
+            except Exception as e:
+                # Streamlit Community Cloud 容器文件系统是临时的，重启后 .env 会丢失
+                st.warning(f"保存失败（{e}）。云端部署时 Key 仅在本次会话内有效。")
         else:
             st.warning("请先输入 API Key")
 
@@ -112,6 +116,12 @@ if uploaded_file is not None:
     # 导入数据解析模块
     from modules.data_input import parse_financial_data, auto_extract_metrics
 
+    # 更换了上传文件时，重置 AI 提取标记，避免沿用上一个文件的指标
+    file_sig = (uploaded_file.name, uploaded_file.size)
+    if st.session_state.get("_file_sig") != file_sig:
+        st.session_state._file_sig = file_sig
+        st.session_state.pop("ai_extracted", None)
+
     with st.spinner("正在解析文件..."):
         try:
             raw_text, df = parse_financial_data(uploaded_file)
@@ -155,6 +165,9 @@ if uploaded_file is not None:
                         call_llm
                     )
                     if ai_metrics:
+                        # 清除旧的指标输入框缓存，让 AI 提取的新值在 rerun 后正确显示
+                        for k in list(ai_metrics.keys()):
+                            st.session_state.pop(f"metric_{k}", None)
                         st.session_state.metrics = ai_metrics
                         st.session_state.ai_extracted = True  # 标记已AI提取，rerun后不覆盖
                         st.success("AI 提取完成！")

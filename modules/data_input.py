@@ -2,6 +2,11 @@
 模块1：企业数据录入
 支持上传 PDF / Excel / CSV 文件，提取关键财务指标。
 包含规则提取和 LLM 智能提取（分块处理长文本、目录引导、详细错误提示）。
+
+【修复说明】原分块逻辑在文本长度超过 CHUNK_SIZE 时，最后一个分块抵达文本末尾后
+start = end - OVERLAP 会使 start 永远停留在 text_len - OVERLAP，导致 while 死循环，
+chunks 列表无限增长 → 进程内存耗尽被系统强杀（表现为 "Oh no. Error running app."）。
+修复方式：当 end 已达文本末尾时直接 break。
 """
 import pandas as pd
 import PyPDF2
@@ -170,12 +175,14 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
     OVERLAP = 500
     st.info(f"文本较长（{text_len}字符），分块提取摘要后再整合，预计30-60秒...")
 
-    # 分块
+    # 分块（修复：end 到达文本末尾后必须 break，否则死循环）
     chunks = []
     start = 0
     while start < text_len:
         end = min(start + CHUNK_SIZE, text_len)
         chunks.append(raw_text[start:end])
+        if end >= text_len:
+            break
         start = end - OVERLAP
 
     total_chunks = len(chunks)
