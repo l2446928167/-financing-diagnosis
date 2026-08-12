@@ -4,7 +4,7 @@ import re
 import os
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "v1.4 (2026-08-12)"
+APP_VERSION = "v1.5 (2026-08-12)"
 
 # 加载 .env（用于本地保存 API Key）
 load_dotenv()
@@ -152,17 +152,63 @@ if uploaded_file is not None:
     else:
         st.subheader("📊 自动提取的关键财务指标（可手动修正）")
 
+    # v1.5：适配新的含unit/page的指标格式
+    metrics_dict = st.session_state.metrics
     col1, col2, col3 = st.columns(3)
     updated_metrics = {}
-    keys = list(st.session_state.metrics.keys())
+    keys = [k for k in metrics_dict if not k.startswith("__")]
     for i, key in enumerate(keys):
         with [col1, col2, col3][i % 3]:
-            updated_metrics[key] = st.text_input(
-                label=key,
-                value=st.session_state.metrics[key],
-                key=f"metric_{key}"
-            )
+            field = metrics_dict[key]
+            # 兼容新旧格式
+            if isinstance(field, dict):
+                val = field.get("value", "")
+                unit = field.get("unit", "")
+                page = field.get("page", "")
+                label = f"{key}"
+                caption_parts = []
+                if unit:
+                    caption_parts.append(f"单位: {unit}")
+                if page:
+                    caption_parts.append(f"第{page}页")
+                new_val = st.text_input(
+                    label=label,
+                    value=val,
+                    key=f"metric_{key}"
+                )
+                if caption_parts:
+                    st.caption(" | ".join(caption_parts))
+                # 更新时保留unit和page
+                updated_metrics[key] = {"value": new_val, "unit": unit, "page": page}
+            else:
+                # 旧格式（纯字符串）
+                new_val = st.text_input(
+                    label=key,
+                    value=str(field),
+                    key=f"metric_{key}"
+                )
+                updated_metrics[key] = {"value": new_val, "unit": "", "page": ""}
+    # 保留特殊键（如 __verification__）
+    for k in metrics_dict:
+        if k.startswith("__"):
+            updated_metrics[k] = metrics_dict[k]
     st.session_state.metrics = updated_metrics
+
+    # v1.5：显示会计校验结果
+    verification = st.session_state.metrics.get("__verification__")
+    if verification:
+        st.subheader("🔍 会计校验结果")
+        for check in verification:
+            status = check.get("是否通过")
+            check_name = check.get("检查项", "")
+            actual = check.get("实际值", "")
+            expected = check.get("预期值", "")
+            if status is True:
+                st.markdown(f"✅ **{check_name}**：通过（{actual}）")
+            elif status is False:
+                st.markdown(f"⚠️ **{check_name}**：偏差 — {actual}，预期：{expected}")
+            else:
+                st.markdown(f"ℹ️ **{check_name}**：无法校验（{actual}）")
 
     # AI 智能提取按钮
     if st.session_state.get('api_key'):
@@ -189,13 +235,28 @@ if uploaded_file is not None:
                         old_metrics = dict(st.session_state.metrics)
                         st.session_state.metrics = ai_metrics
                         st.session_state.ai_extracted = True
-                        # 计算差异
+                        # v1.5：计算差异，适配含unit/page的指标格式
                         changes = []
                         for k in ai_metrics:
-                            old_val = old_metrics.get(k, "")
-                            new_val = ai_metrics.get(k, "")
+                            if k.startswith("__"):
+                                continue  # 跳过特殊键
+                            old_field = old_metrics.get(k, "")
+                            new_field = ai_metrics.get(k, "")
+                            # 兼容新旧格式
+                            old_val = old_field.get("value", "") if isinstance(old_field, dict) else str(old_field)
+                            new_val = new_field.get("value", "") if isinstance(new_field, dict) else str(new_field)
+                            new_unit = new_field.get("unit", "") if isinstance(new_field, dict) else ""
+                            new_page = new_field.get("page", "") if isinstance(new_field, dict) else ""
                             if old_val != new_val and new_val:
-                                changes.append(f"{k}: {old_val or '(空)'} → {new_val}")
+                                detail = f"{k}: {old_val or '(空)'} → {new_val}"
+                                extra = []
+                                if new_unit:
+                                    extra.append(f"单位:{new_unit}")
+                                if new_page:
+                                    extra.append(f"第{new_page}页")
+                                if extra:
+                                    detail += f" ({', '.join(extra)})"
+                                changes.append(detail)
                         if changes:
                             st.success(f"✅ AI 提取完成！更新了 {len(changes)} 个指标")
                             with st.expander("📋 查看AI提取的变更"):
@@ -293,8 +354,18 @@ if uploaded_file is not None:
         from modules.report_generator import generate_pdf
         from utils.llm_helper import call_llm
 
+        # v1.5：将嵌套格式指标展平为简单字符串，兼容diagnosis.py等下游模块
+        flat_metrics = {}
+        for k, v in st.session_state.metrics.items():
+            if k.startswith("__"):
+                continue  # 跳过特殊键
+            if isinstance(v, dict):
+                flat_metrics[k] = v.get("value", "")
+            else:
+                flat_metrics[k] = str(v)
+
         full_metrics = {
-            **st.session_state.metrics,
+            **flat_metrics,
             "经营年限": operating_years,
             "客户集中度": customer_concentration,
             "平均融资利率": avg_interest_rate,

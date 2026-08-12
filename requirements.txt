@@ -1,7 +1,7 @@
 streamlit
 pandas
 openpyxl
-PyPDF2
+pdfplumber
 reportlab
 openai
 python-dotenv
