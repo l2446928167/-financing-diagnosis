@@ -4,7 +4,7 @@ import re
 import os
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "v1.5 (2026-08-12)"
+APP_VERSION = "v1.5.1 (2026-08-12)"
 
 # 加载 .env（用于本地保存 API Key）
 load_dotenv()
@@ -114,6 +114,12 @@ uploaded_file = st.file_uploader("支持 PDF / Excel / CSV 格式", type=["pdf",
 
 if uploaded_file is not None:
     from modules.data_input import parse_financial_data, auto_extract_metrics
+
+    # v1.5.1 修复：更换上传文件时重置 AI 提取标记，避免沿用上一个文件的指标
+    file_sig = (uploaded_file.name, uploaded_file.size)
+    if st.session_state.get("_file_sig") != file_sig:
+        st.session_state._file_sig = file_sig
+        st.session_state.ai_extracted = False
 
     with st.spinner("正在解析文件..."):
         try:
@@ -233,6 +239,10 @@ if uploaded_file is not None:
                     if ai_metrics:
                         # 记录AI提取前的结果，用于对比
                         old_metrics = dict(st.session_state.metrics)
+                        # v1.5.1 修复：清除指标输入框的旧缓存，否则 rerun 后输入框
+                        # 仍显示 AI 提取前的值，并把旧值写回 metrics 覆盖 AI 结果
+                        for k in list(ai_metrics.keys()):
+                            st.session_state.pop(f"metric_{k}", None)
                         st.session_state.metrics = ai_metrics
                         st.session_state.ai_extracted = True
                         # v1.5：计算差异，适配含unit/page的指标格式
@@ -347,6 +357,15 @@ if uploaded_file is not None:
             min_value=-100.0, max_value=500.0, value=8.0, step=1.0
         )
 
+    # v1.5.1 新增：抵押能力（影响需抵押物产品的匹配与差距分析）
+    col_cr7, col_cr8 = st.columns([1, 2])
+    with col_cr7:
+        can_collateral = st.selectbox(
+            "是否可提供抵押/担保",
+            ["可提供", "暂无法提供"],
+            help="影响需要抵押物的产品匹配（如应收账款质押贷、政策性担保贷）"
+        )
+
     # ======================== 诊断按钮 ========================
     if st.button("🔍 开始金融健康诊断", type="primary"):
         from modules.diagnosis import diagnose
@@ -380,6 +399,8 @@ if uploaded_file is not None:
             "融资机构数量": financing_institution_count,
             "营收增长率": revenue_growth_rate,
             "净利润增长率": profit_growth_rate,
+            # v1.5.1 新增
+            "可提供抵押": can_collateral == "可提供",
         }
 
         result = diagnose(full_metrics)
@@ -563,14 +584,22 @@ if uploaded_file is not None:
                 )
                 action_rows = []
                 for act in action_plan:
+                    # v1.5.1：区分"补齐即可解锁"与"涉及但仍卡在其他条件"两种口径
+                    mode = act.get("impact_mode", "unlock")
+                    if mode == "unlock":
+                        impact_label = str(act["impact"])  # 统一字符串类型，避免混合类型导致渲染失败
+                        products_label = "、".join(act["impact_products"][:5]) if act["impact_products"] else "—"
+                    else:
+                        impact_label = f"{act['impact']}（尚有其他差距）"
+                        products_label = "、".join(act["impact_products"][:5]) + "…" if act["impact_products"] else "—"
                     action_rows.append({
                         "优先级": act["priority"],
                         "行动": act["action"],
                         "当前值": act["current"],
                         "目标值": act["target"],
                         "难度": act["difficulty"],
-                        "解锁产品数": act["impact"],
-                        "解锁产品": "、".join(act["impact_products"][:5]) if act["impact_products"] else "—",
+                        "影响产品数": impact_label,
+                        "相关产品": products_label,
                         "预计时间": act["estimated_time"],
                         "性价比": act["cost_efficiency"],
                     })

@@ -110,17 +110,20 @@ def extract_from_pdf(file):
             page_text = page.extract_text() or ""
             if page_text:
                 full_text += page_text + "\n"
-            # 提取页面表格，转为"行头: 值"格式
+            # 提取页面表格，转为"行头 | 列名: 值"格式（v1.5.1：保留行头语义，避免数值与科目脱节）
             tables = page.extract_tables()
             for table in tables:
                 if not table or len(table) < 2:
                     continue
                 headers = table[0]
                 for row in table[1:]:
-                    for j, cell in enumerate(row):
+                    row_label = str(row[0]).strip() if row and row[0] else ""
+                    for j, cell in enumerate(row[1:], start=1):
                         header = headers[j] if j < len(headers) else f"列{j+1}"
                         if cell and str(cell).strip():
-                            full_text += f"{header}: {str(cell).strip()}\n"
+                            header_str = str(header).strip() if header else f"列{j+1}"
+                            prefix = f"{row_label} | {header_str}" if row_label else header_str
+                            full_text += f"{prefix}: {str(cell).strip()}\n"
     return full_text
 
 
@@ -174,6 +177,10 @@ METRICS_SCHEMA = {
     "上年经营活动现金流净额": {"value": "", "unit": "", "page": ""},
 }
 
+# v1.5.1：比率类字段（永远不应获得金额单位）
+RATIO_FIELDS = {"资产负债率", "流动比率"}
+
+
 # v1.5：所有指标字段名列表（固定顺序）
 METRICS_FIELD_NAMES = list(METRICS_SCHEMA.keys())
 
@@ -199,19 +206,48 @@ def _find_page_number(text, position):
     return ""
 
 
-def _detect_unit_near_value(text, position, window=80):
+# v1.5.1：页头单位声明正则（年报/财报表格页头常见"单位：元 币种：人民币"等表述）
+_PAGE_UNIT_RE = re.compile(r'单位[:：]\s*(?:人民币)?\s*(亿元|万元|千元|元)')
+
+
+def _detect_unit_near_value(text, value_position, window=80):
     """
-    v1.5：在文本中value位置附近检测单位（元/万元/亿元）。
-    搜索范围为position前后各window个字符。
+    v1.5.1：检测数值单位。参数为"数值起始位置"（非标签位置）。
+    优先级：
+    1) 数值后紧跟 % → 百分比字段，无单位
+    2) 从所在页向前回溯最多2页，取数值位置之前最近的单位声明
+       （财报表格常跨页，单位声明留在表格起始页页头）
+    3) 数值附近±window字符的窗口启发式（兜底）
     """
-    start = max(0, position - window)
-    end = min(len(text), position + window)
+    # 1) 百分比保护：资产负债率等比率字段不应被标成金额单位
+    after = text[value_position:value_position + 15].strip()
+    if after.startswith("%") or after.startswith("％"):
+        return ""
+
+    # 2) 单位声明回溯（最多2页）
+    markers = list(re.finditer(r'\[第\d+页\]', text[:value_position + 1]))
+    if markers:
+        lookback_start = markers[-min(2, len(markers))].start()
+        nxt = re.search(r'\[第\d+页\]', text[value_position:])
+        seg_end = value_position + nxt.start() if nxt else len(text)
+    else:
+        lookback_start = 0
+        seg_end = min(len(text), value_position + 300)
+    before_decls = [m for m in _PAGE_UNIT_RE.finditer(text, lookback_start, seg_end)
+                    if m.start() < value_position]
+    if before_decls:
+        return before_decls[-1].group(1)
+
+    # 3) 窗口启发式兜底
+    start = max(0, value_position - window)
+    end = min(len(text), value_position + window)
     context = text[start:end]
-    # 优先匹配"亿元"，其次"万元"，最后"元"（避免"万元"中的"元"误匹配）
     if "亿元" in context:
         return "亿元"
     elif "万元" in context:
         return "万元"
+    elif "千元" in context:
+        return "千元"
     elif "元" in context:
         return "元"
     return ""
@@ -222,6 +258,7 @@ def normalize_units(metrics_dict):
     v1.5：单位归一化函数。
     识别每个字段的unit值，统一换算到万元。
     - 元 ÷ 10000 → 万元
+    - 千元 ÷ 10 → 万元
     - 亿元 × 10000 → 万元
     - 换算后unit标记为"万元"
     - 无法识别单位的字段保持原值
@@ -239,6 +276,7 @@ def normalize_units(metrics_dict):
         if not val_str or not unit:
             continue  # 空值或无单位，不处理
         try:
+            unit = str(unit).replace("人民币", "").strip()  # v1.5.1：兼容"人民币元"等表述
             # 清理千分位逗号
             val_clean = val_str.replace(",", "").replace("，", "")
             # 移除尾部非数字字符（如"(计算值)"）
@@ -248,6 +286,10 @@ def normalize_units(metrics_dict):
             val_num = float(val_clean)
             if unit == "元":
                 val_num = val_num / 10000
+                field["value"] = f"{val_num:.2f}"
+                field["unit"] = "万元"
+            elif unit == "千元":
+                val_num = val_num / 10
                 field["value"] = f"{val_num:.2f}"
                 field["unit"] = "万元"
             elif unit == "亿元":
@@ -366,6 +408,28 @@ def verify_accounting(metrics_dict):
     return warnings
 
 
+def _search_metric(raw_text, names):
+    """
+    v1.5.1：两段式锚定搜索，降低正文叙述中的误匹配。
+    第一轮：行首锚定——标签位于行首、数值在同一行60字符内（财报报表行格式）。
+    第二轮：宽松匹配——标签后100字符内找数值（兜底）。
+    返回 (match, matched_name)；未命中返回 (None, None)。
+    """
+    for name in names:
+        esc = re.escape(name)
+        pattern = rf"^[ \t]*(?:[一二三四五六七八九十\d]+[、.．])?\s*{esc}[^\n。；;]{{0,60}}?([0-9][0-9,]*\.?\d*)"
+        m = re.search(pattern, raw_text, re.MULTILINE)
+        if m:
+            return m, name
+    for name in names:
+        esc = re.escape(name)
+        pattern = rf"{esc}.{{0,100}}?([0-9][0-9,]*\.?\d*)"
+        m = re.search(pattern, raw_text, re.DOTALL)
+        if m:
+            return m, name
+    return None, None
+
+
 def auto_extract_metrics(raw_text, df):
     """
     从原始文本或DataFrame中自动提取常见财务指标。
@@ -389,28 +453,17 @@ def auto_extract_metrics(raw_text, df):
                     metrics[key]["value"] = str(val)
                     break
 
-    # 如果从PDF提取了文本，尝试用关键词+数字正则提取
+    # 如果从PDF提取了文本，用锚定正则提取（v1.5.1：别名优先+行首锚定，减少正文误匹配）
     if raw_text:
         for key in metrics:
             if not metrics[key]["value"]:
-                # 先搜索主名称
-                pattern = rf"{key}.*?([0-9,]+\.?\d*)"
-                match = re.search(pattern, raw_text)
+                names = FIELD_ALIASES.get(key, []) + [key]
+                match, _matched = _search_metric(raw_text, names)
                 if match:
                     metrics[key]["value"] = match.group(1)
                     metrics[key]["page"] = _find_page_number(raw_text, match.start())
-                    metrics[key]["unit"] = _detect_unit_near_value(raw_text, match.start())
-                    continue
-                # 再搜索别名
-                aliases = FIELD_ALIASES.get(key, [])
-                for alias in aliases:
-                    pattern = rf"{alias}.*?([0-9,]+\.?\d*)"
-                    match = re.search(pattern, raw_text)
-                    if match:
-                        metrics[key]["value"] = match.group(1)
-                        metrics[key]["page"] = _find_page_number(raw_text, match.start())
-                        metrics[key]["unit"] = _detect_unit_near_value(raw_text, match.start())
-                        break
+                    unit = _detect_unit_near_value(raw_text, match.start(1))
+                    metrics[key]["unit"] = "" if key in RATIO_FIELDS else unit
 
     return metrics
 
@@ -464,26 +517,21 @@ def _supplement_missing_metrics(result, raw_text):
         return 0
 
     supplement_count = 0
-    # 排除流动比率，最后单独处理（依赖流动资产和流动负债）
-    empty_fields = [k for k in result
-                    if k.startswith("__") or not isinstance(result[k], dict)]
+    # v1.5.1：删除原先逻辑反转的死代码行；排除流动比率，最后单独处理
     empty_fields = [k for k in result
                     if not k.startswith("__") and isinstance(result[k], dict)
                     and (not result[k].get("value", "") or result[k]["value"] == "未找到")
                     and k != "流动比率"]
 
     for field in empty_fields:
-        search_names = [field] + FIELD_ALIASES.get(field, [])
-        for name in search_names:
-            # 允许跨行匹配，限制标签与数值间距100字符以减少误匹配
-            pattern = rf"{name}.{{0,100}}?([0-9,]+\.?\d*)"
-            match = re.search(pattern, raw_text, re.DOTALL)
-            if match and match.group(1):
-                result[field]["value"] = match.group(1)
-                result[field]["page"] = _find_page_number(raw_text, match.start())
-                result[field]["unit"] = _detect_unit_near_value(raw_text, match.start())
-                supplement_count += 1
-                break
+        search_names = FIELD_ALIASES.get(field, []) + [field]
+        match, _matched = _search_metric(raw_text, search_names)
+        if match and match.group(1):
+            result[field]["value"] = match.group(1)
+            result[field]["page"] = _find_page_number(raw_text, match.start())
+            unit = _detect_unit_near_value(raw_text, match.start(1))
+            result[field]["unit"] = "" if field in RATIO_FIELDS else unit
+            supplement_count += 1
 
     # 最后处理流动比率（依赖流动资产和流动负债的值）
     cr_field = result.get("流动比率", {})
@@ -506,15 +554,12 @@ def _supplement_missing_metrics(result, raw_text):
                 pass
         else:
             # 流动资产或流动负债仍未找到，尝试在原始文本中直接搜索流动比率
-            for name in ["流动比率"] + FIELD_ALIASES.get("流动比率", []):
-                pattern = rf"{name}.{{0,100}}?([0-9,]+\.?\d*)"
-                match = re.search(pattern, raw_text, re.DOTALL)
-                if match and match.group(1):
-                    result["流动比率"]["value"] = match.group(1)
-                    result["流动比率"]["page"] = _find_page_number(raw_text, match.start())
-                    result["流动比率"]["unit"] = _detect_unit_near_value(raw_text, match.start())
-                    supplement_count += 1
-                    break
+            match, _matched = _search_metric(raw_text, ["流动比率"] + FIELD_ALIASES.get("流动比率", []))
+            if match and match.group(1):
+                result["流动比率"]["value"] = match.group(1)
+                result["流动比率"]["page"] = _find_page_number(raw_text, match.start())
+                result["流动比率"]["unit"] = _detect_unit_near_value(raw_text, match.start(1))
+                supplement_count += 1
 
     return supplement_count
 

@@ -45,6 +45,20 @@ def _check_product_gaps(metrics, row):
     """
     gaps = []
 
+    # 0. 法院执行/诉讼记录检查（v1.5.1：与 product_matching 的一票否决口径对齐，
+    #    否则匹配表计0个完全匹配、本模块却计为达标，两处数字矛盾）
+    court_record = str(metrics.get("法院执行记录", "")).strip()
+    if court_record and "有" in court_record and "无" not in court_record:
+        gaps.append({
+            "item": "司法记录",
+            "current": "有法院执行/诉讼记录",
+            "required": "无未结执行/重大诉讼",
+            "gap_size": 1,
+            "difficulty": "中高",
+            "difficulty_score": DIFFICULTY_SCORE["中高"],
+            "action": "优先了结涉诉/被执行案件"
+        })
+
     # 提取企业指标
     revenue = safe_float(metrics.get("营业收入", 0))
     years = safe_float(metrics.get("经营年限", 0))
@@ -184,14 +198,14 @@ def _check_product_gaps(metrics, row):
                 "gap_size": 1,
                 "difficulty": "不可控",
                 "difficulty_score": DIFFICULTY_SCORE["不可控"],
-                "action": f"企业需属于{industry_limit}行业"
+                "action": f"申报{industry_limit}相关行业资质或转型"
             })
 
     return gaps
 
 
-def _estimate_time(difficulty, gap_size):
-    """根据难度和差距量估算达标时间"""
+def _estimate_time(difficulty, gap_size, item=""):
+    """根据难度、差距量和差距项估算达标时间"""
     if difficulty == "不可控":
         return "只能等待，无法主动缩短"
     elif difficulty == "高":
@@ -202,12 +216,20 @@ def _estimate_time(difficulty, gap_size):
         else:
             return "需要3-12个月提升"
     elif difficulty == "中高":
+        if "司法" in item:
+            return "视案件进展，建议尽快履行/和解"
         return "需要6-18个月调整"
     elif difficulty == "中":
-        if gap_size >= 2:
-            return "需要1-2年规范经营"
+        # v1.5.1：按差距项给出对应的时间估算（原先一律写"规范纳税"不准确）
+        if "纳税" in item:
+            if gap_size >= 2:
+                return "需要1-2年规范经营"
+            else:
+                return "规范纳税1-2年可改善"
+        elif "融资机构" in item:
+            return "结清/归并部分融资后，征信更新约3-6个月"
         else:
-            return "规范纳税1-2年可改善"
+            return "需要1-2年规范经营"
     elif difficulty == "低":
         return "提供相关材料即可"
     else:
@@ -244,53 +266,6 @@ def _compute_impact(action_key, gap_item, df_products, metrics):
             current_unlocked.append(row["产品名"])
 
     return len(current_unlocked), current_unlocked
-
-
-def _compute_impact_with_target(action_key, target_value, df_products, metrics):
-    """
-    计算某个行动项达成后能解锁的产品
-    考虑补齐该差距后，产品其他条件也满足的情况
-    action_key: 差距项名称
-    target_value: 目标值（达标后的值）
-    """
-    # 构造模拟的metrics（补齐该差距后的指标）
-    simulated = dict(metrics)
-
-    if action_key == "纳税评级":
-        simulated["纳税信用评级"] = target_value
-    elif action_key == "营收":
-        simulated["营业收入"] = target_value
-    elif action_key == "经营年限":
-        simulated["经营年限"] = target_value
-    elif action_key == "融资机构数":
-        simulated["融资机构数量"] = target_value
-    elif action_key == "资产负债率":
-        # 需要调整总负债来模拟资产负债率
-        # 不直接修改，而是标记
-        pass
-    elif action_key == "流动比率":
-        simulated["流动比率"] = target_value
-
-    # 用模拟指标重新检查每个产品
-    unlocked = []
-    original_metrics = dict(metrics)
-
-    for _, row in df_products.iterrows():
-        # 原始指标下是否不达标
-        original_gaps = _check_product_gaps(original_metrics, row)
-        if not original_gaps:
-            continue  # 已经达标
-
-        # 模拟指标下是否达标
-        simulated_gaps = _check_product_gaps(simulated, row)
-        # 过滤掉与action_key无关的差距
-        related_gaps = [g for g in simulated_gaps if g["item"] == action_key]
-        other_gaps = [g for g in simulated_gaps if g["item"] != action_key]
-
-        if not related_gaps and not other_gaps:
-            unlocked.append(row["产品名"])
-
-    return len(unlocked), unlocked
 
 
 def analyze_gaps(metrics, dimension_scores, df_products):
@@ -366,20 +341,23 @@ def analyze_gaps(metrics, dimension_scores, df_products):
     # 第二步：计算每个行动项的影响（解锁产品数）
     action_items = []
     for action_key, info in all_gap_items.items():
-        # 计算影响：补齐此项后，仅因此项不达标的产品将解锁
+        # 计算影响：补齐此项后，仅因此项不达标的产品将解锁（严格口径）
         impact_count, impact_products = _compute_impact(
             info["item"], info, df_products, metrics
         )
-        # 如果简单计算结果为0，用更宽泛的方式：统计有多少产品因该项不达标
+        impact_mode = "unlock"
+        # v1.5.1：兜底时明确标记为"关联"口径，不再冒充"解锁"，
+        # 避免过度承诺（这些产品可能还卡在其他条件上）
         if impact_count == 0:
             impact_count = len(info["products"])
             impact_products = info["products"]
+            impact_mode = "related"
 
         # 计算性价比 = 影响数 / 难度分
         cost_efficiency = impact_count / info["difficulty_score"] if info["difficulty_score"] > 0 else 0
 
         # 估算达标时间
-        estimated_time = _estimate_time(info["difficulty"], info["gap_size"])
+        estimated_time = _estimate_time(info["difficulty"], info["gap_size"], info["item"])
 
         action_items.append({
             "action": info["action"],
@@ -388,6 +366,7 @@ def analyze_gaps(metrics, dimension_scores, df_products):
             "gap": f"{info['gap_size']:.1f}" if info["difficulty"] != "不可控" else "等待",
             "difficulty": info["difficulty"],
             "impact": impact_count,
+            "impact_mode": impact_mode,  # v1.5.1：unlock=补齐即解锁 / related=有关联但尚有其他差距
             "impact_products": impact_products,
             "estimated_time": estimated_time,
             "cost_efficiency": round(cost_efficiency, 2),
@@ -409,9 +388,14 @@ def analyze_gaps(metrics, dimension_scores, df_products):
     summary_parts = [f"当前可匹配{full_match_count}个产品"]
     if action_items:
         best = action_items[0]
-        summary_parts.append(
-            f"补齐{best['action']}后可增加{best['impact']}个产品"
-        )
+        if best.get("impact_mode") == "unlock":
+            summary_parts.append(
+                f"补齐{best['action']}后可增加{best['impact']}个产品"
+            )
+        else:
+            summary_parts.append(
+                f"{best['action']}涉及{best['impact']}个产品（补齐后可能仍需满足其他条件）"
+            )
         summary_parts.append(f"建议优先{best['action']}（性价比{best['cost_efficiency']}）")
 
     summary = "，".join(summary_parts) + "。"
