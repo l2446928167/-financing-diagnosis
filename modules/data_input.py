@@ -2,6 +2,8 @@
 模块1：企业数据录入
 支持上传 PDF / Excel / CSV 文件，提取关键财务指标。
 包含规则提取和 LLM 智能提取（分块处理长文本、目录引导、详细错误提示）。
+v1.3：扩展指标字典，新增8维评分所需的经营现金流、存货、利息费用、营业成本、
+      流动资产、流动负债、上年营业收入、上年净利润等字段。
 """
 import pandas as pd
 import PyPDF2
@@ -64,6 +66,7 @@ def auto_extract_metrics(raw_text, df):
     """
     从原始文本或DataFrame中自动提取常见财务指标。
     使用简单的关键词匹配，适合快速预览。
+    v1.3：扩展指标字典，包含8维评分所需的所有指标。
     返回一个字典，包含指标名和提取到的值（字符串）。
     """
     metrics = {
@@ -74,7 +77,15 @@ def auto_extract_metrics(raw_text, df):
         "应收账款": "",
         "短期借款": "",
         "流动比率": "",
-        "资产负债率": ""
+        "资产负债率": "",
+        "经营活动现金流净额": "",
+        "存货": "",
+        "利息费用": "",
+        "营业成本": "",
+        "流动资产": "",
+        "流动负债": "",
+        "上年营业收入": "",
+        "上年净利润": "",
     }
     # 如果DataFrame存在，尝试从列名匹配
     if df is not None:
@@ -97,6 +108,15 @@ def auto_extract_metrics(raw_text, df):
     return metrics
 
 
+# v1.3：扩展的JSON模板，包含8维评分所需的所有指标
+METRICS_JSON_TEMPLATE = (
+    '{"总资产":"", "总负债":"", "营业收入":"", "净利润":"", '
+    '"应收账款":"", "短期借款":"", "流动比率":"", "资产负债率":"", '
+    '"经营活动现金流净额":"", "存货":"", "利息费用":"", "营业成本":"", '
+    '"流动资产":"", "流动负债":"", "上年营业收入":"", "上年净利润":""}'
+)
+
+
 def parse_metrics_response(text):
     """辅助函数：从LLM返回的文本中解析出财务指标字典"""
     if not text:
@@ -107,7 +127,13 @@ def parse_metrics_response(text):
             metrics = json.loads(json_match.group())
         else:
             metrics = json.loads(text)
-        expected_keys = ["总资产", "总负债", "营业收入", "净利润", "应收账款", "短期借款", "流动比率", "资产负债率"]
+        # v1.3：扩展的expected_keys，包含8维评分所需的所有指标
+        expected_keys = [
+            "总资产", "总负债", "营业收入", "净利润", "应收账款", "短期借款",
+            "流动比率", "资产负债率",
+            "经营活动现金流净额", "存货", "利息费用", "营业成本",
+            "流动资产", "流动负债", "上年营业收入", "上年净利润",
+        ]
         for k in expected_keys:
             if k not in metrics:
                 metrics[k] = ""
@@ -120,6 +146,8 @@ def parse_metrics_response(text):
 def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
     """
     使用大模型从原始文本或DataFrame中智能提取财务指标。
+    v1.3：扩展提取指标列表，包含经营活动现金流净额、存货、利息费用、营业成本、
+          流动资产、流动负债、上年营业收入、上年净利润。
     支持长文本分块处理：
     1. 优先处理Excel/CSV表格
     2. 短文本直接提取
@@ -136,7 +164,7 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
         st.info("📊 检测到表格数据，正在用 AI 分析表格...")
         csv_str = df.head(50).to_csv(index=False)
         prompt = f"""从以下表格中提取财务指标（单位：万元）。输出JSON：
-{{"总资产":"", "总负债":"", "营业收入":"", "净利润":"", "应收账款":"", "短期借款":"", "流动比率":"", "资产负债率":""}}
+{METRICS_JSON_TEMPLATE}
 表格：
 {csv_str}"""
         resp = call_llm_func(
@@ -162,7 +190,7 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
         # 短文本直接提取
         if text_len <= 20000:
             st.info(f"📝 文本长度 {text_len} 字符，正在用 AI 直接提取...")
-            prompt = f"从财报文本中提取财务指标（单位：万元）：\n{raw_text}\n输出JSON。"
+            prompt = f"从财报文本中提取财务指标（单位：万元）：\n{raw_text}\n输出JSON，格式如下：\n{METRICS_JSON_TEMPLATE}"
             resp = call_llm_func(
                 "你是财务提取器，仅输出JSON。",
                 prompt, model_choice, api_key, temperature=0.1, max_tokens=800
@@ -198,7 +226,7 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
             summaries = []
 
             for i, chunk in enumerate(chunks):
-                chunk_prompt = f"""从以下财报片段中提取所有出现的财务关键数字（如总资产、负债、营收、净利润、应收账款等），
+                chunk_prompt = f"""从以下财报片段中提取所有出现的财务关键数字（如总资产、负债、营收、净利润、应收账款、经营活动现金流净额、存货、利息费用、营业成本、流动资产、流动负债等），
 用简洁中文列出，保留原始数值和单位。不要输出JSON。
 片段：
 {chunk}"""
@@ -231,7 +259,7 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
 浓缩信息：
 {condensed}
 输出严格JSON：
-{{"总资产":"", "总负债":"", "营业收入":"", "净利润":"", "应收账款":"", "短期借款":"", "流动比率":"", "资产负债率":""}}"""
+{METRICS_JSON_TEMPLATE}"""
             final_resp = call_llm_func(
                 "你是财务提取器，仅输出JSON。",
                 final_prompt, model_choice, api_key, temperature=0.1, max_tokens=800

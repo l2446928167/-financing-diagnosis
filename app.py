@@ -4,7 +4,7 @@ import re
 import os
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "v1.2-fix2 (2026-08-12)"
+APP_VERSION = "v1.3 (2026-08-12)"
 
 # 加载 .env（用于本地保存 API Key）
 load_dotenv()
@@ -62,14 +62,14 @@ if "ai_extracted" not in st.session_state:
 
 # ======================== 辅助函数 ========================
 def generate_diagnosis_text(full_metrics, dims, overall, model_choice, api_key):
-    """用 LLM 生成诊断总结、风险点、改善建议，失败返回 None"""
+    """用 LLM 生成诊断总结、风险点、改善建议，覆盖8个维度，失败返回 None"""
     from utils.llm_helper import call_llm
 
     system_prompt = """
-    你是一位资深的小微企业融资顾问。根据提供的企业财务指标和5维度健康评分，
+    你是一位资深的小微企业融资顾问。根据提供的企业财务指标和8维度健康评分，
     请输出以下内容（用中文）：
     1. 总体评价：100字以内的概括性评价。
-    2. 风险点：不超过5条具体风险，每条以"- "开头，语气客观，使用"建议"而非"你应该"。
+    2. 风险点：不超过8条具体风险，每条以"- "开头，语气客观，使用"建议"而非"你应该"。
     3. 改善建议：针对每个不健康维度给出2-3条具体、可操作的建议，以"- "开头。
     请严格按照以下格式输出，不要多余文字：
     【总体评价】
@@ -92,6 +92,12 @@ def generate_diagnosis_text(full_metrics, dims, overall, model_choice, api_key):
     行业：{full_metrics.get('行业', '未填写')}
     客户集中度：{full_metrics.get('客户集中度', '未填写')}
     平均融资利率：{full_metrics.get('平均融资利率', '未填写')}%
+    纳税信用评级：{full_metrics.get('纳税信用评级', '未填写')}
+    实控人征信状态：{full_metrics.get('实控人征信状态', '未填写')}
+    法院执行记录：{full_metrics.get('法院执行记录', '未填写')}
+    融资机构数量：{full_metrics.get('融资机构数量', '未填写')}
+    营收增长率：{full_metrics.get('营收增长率', '未填写')}%
+    净利润增长率：{full_metrics.get('净利润增长率', '未填写')}%
 
     各维度评分（满分10）：
     """
@@ -244,6 +250,42 @@ if uploaded_file is not None:
     with c3:
         ar_over_12m = st.number_input("超过12个月（%）", 0, 100, 10)
 
+    # ===== v1.3 新增：补充信用与经营信息 =====
+    st.subheader("📋 补充信用与经营信息")
+    col_cr1, col_cr2, col_cr3 = st.columns(3)
+    with col_cr1:
+        tax_credit_rating = st.selectbox(
+            "纳税信用评级",
+            ["未评级", "A", "B", "M", "C", "D"]
+        )
+    with col_cr2:
+        controller_credit = st.selectbox(
+            "实控人征信状态",
+            ["良好", "一般", "有逾期记录"]
+        )
+    with col_cr3:
+        court_execution = st.selectbox(
+            "是否有法院执行/诉讼记录",
+            ["无", "有"]
+        )
+
+    col_cr4, col_cr5, col_cr6 = st.columns(3)
+    with col_cr4:
+        financing_institution_count = st.number_input(
+            "融资机构数量",
+            min_value=0, max_value=10, value=1, step=1
+        )
+    with col_cr5:
+        revenue_growth_rate = st.number_input(
+            "营收增长率（%）",
+            min_value=-100.0, max_value=500.0, value=10.0, step=1.0
+        )
+    with col_cr6:
+        profit_growth_rate = st.number_input(
+            "净利润增长率（%）",
+            min_value=-100.0, max_value=500.0, value=8.0, step=1.0
+        )
+
     # ======================== 诊断按钮 ========================
     if st.button("🔍 开始金融健康诊断", type="primary"):
         from modules.diagnosis import diagnose
@@ -259,7 +301,14 @@ if uploaded_file is not None:
             "行业": industry,
             "应收账款_3月内占比": ar_less_3m,
             "应收账款_3_12月占比": ar_3_12m,
-            "应收账款_超12月占比": ar_over_12m
+            "应收账款_超12月占比": ar_over_12m,
+            # v1.3 新增字段
+            "纳税信用评级": tax_credit_rating if tax_credit_rating != "未评级" else "",
+            "实控人征信状态": controller_credit,
+            "法院执行记录": court_execution,
+            "融资机构数量": financing_institution_count,
+            "营收增长率": revenue_growth_rate,
+            "净利润增长率": profit_growth_rate,
         }
 
         result = diagnose(full_metrics)
@@ -278,15 +327,22 @@ if uploaded_file is not None:
             else:
                 st.error("高风险")
 
-        st.subheader("各维度评分")
+        st.subheader("各维度评分（8维体系）")
         dims = result['dimension_scores']
         lights = result['traffic_lights']
-        cols = st.columns(5)
+        # 2行4列布局展示8个维度
+        row1_cols = st.columns(4)
+        row2_cols = st.columns(4)
         dim_names = list(dims.keys())
         for i, dim in enumerate(dim_names):
-            with cols[i]:
-                st.metric(dim, f"{dims[dim]}/10")
-                st.markdown(lights[dim])
+            if i < 4:
+                with row1_cols[i]:
+                    st.metric(dim, f"{dims[dim]}/10")
+                    st.markdown(lights[dim])
+            else:
+                with row2_cols[i - 4]:
+                    st.metric(dim, f"{dims[dim]}/10")
+                    st.markdown(lights[dim])
 
         # LLM 增强诊断文本
         llm_text = generate_diagnosis_text(
@@ -375,6 +431,8 @@ if uploaded_file is not None:
                     行业：{full_metrics.get('行业', '未填写')}
                     客户集中度：{full_metrics.get('客户集中度', '未填写')}
                     现有融资利率：{full_metrics.get('平均融资利率', '未填写')}%
+                    纳税信用评级：{full_metrics.get('纳税信用评级', '未填写')}
+                    征信状态：{full_metrics.get('实控人征信状态', '未填写')}
 
                     匹配产品列表：
                     {product_list}
@@ -400,6 +458,8 @@ if uploaded_file is not None:
                     营业收入：{full_metrics.get('营业收入', '未填写')}万元
                     经营年限：{full_metrics.get('经营年限', '未填写')}年
                     行业：{full_metrics.get('行业', '未填写')}
+                    纳税信用评级：{full_metrics.get('纳税信用评级', '未填写')}
+                    征信状态：{full_metrics.get('实控人征信状态', '未填写')}
                     """
                     advice_system = "你是小微企业融资改善顾问，给出可操作的建议。"
                     ai_advice = call_llm(advice_system, advice_prompt,
