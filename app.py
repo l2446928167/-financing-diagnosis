@@ -4,7 +4,7 @@ import re
 import os
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "v1.3.1 (2026-08-12)"
+APP_VERSION = "v1.4 (2026-08-12)"
 
 # 加载 .env（用于本地保存 API Key）
 load_dotenv()
@@ -408,7 +408,7 @@ if uploaded_file is not None:
 
             if matches:
                 df_matches = pd.DataFrame(matches)
-                display_cols = ["匹配度", "产品名", "银行", "额度", "利率", "准入条件", "差距说明"]
+                display_cols = ["匹配度", "产品名", "银行", "产品类型", "额度", "利率", "准入条件", "差距说明"]
                 st.dataframe(df_matches[display_cols], width='stretch')
                 st.caption("数据来源及采集日期见产品库明细。")
 
@@ -472,6 +472,72 @@ if uploaded_file is not None:
                         st.markdown(ai_advice)
         except Exception as e:
             st.error(f"产品匹配出错：{e}")
+
+        # ======================== v1.4 差距分析与行动方案 ========================
+        st.markdown("---")
+        st.header("📊 差距分析与行动方案")
+
+        try:
+            from modules.gap_analysis import analyze_gaps
+
+            df_products = pd.read_csv(product_path, encoding="utf-8")
+            gap_result = analyze_gaps(full_metrics, result['dimension_scores'], df_products)
+
+            # 行动优先级表格
+            action_plan = gap_result.get("action_plan", [])
+            if action_plan:
+                st.subheader("🎯 行动优先级（按性价比排序）")
+                st.markdown(
+                    "性价比 = 解锁产品数 ÷ 提升难度分，数值越高表示先做这件事的收益最大。"
+                )
+                action_rows = []
+                for act in action_plan:
+                    action_rows.append({
+                        "优先级": act["priority"],
+                        "行动": act["action"],
+                        "当前值": act["current"],
+                        "目标值": act["target"],
+                        "难度": act["difficulty"],
+                        "解锁产品数": act["impact"],
+                        "解锁产品": "、".join(act["impact_products"][:5]) if act["impact_products"] else "—",
+                        "预计时间": act["estimated_time"],
+                        "性价比": act["cost_efficiency"],
+                    })
+                df_actions = pd.DataFrame(action_rows)
+                st.dataframe(df_actions, width='stretch', hide_index=True)
+            else:
+                st.success("✅ 所有匹配产品均无差距，无需额外行动！")
+
+            # 未达标产品的详细差距
+            gap_details = gap_result.get("product_gap_details", [])
+            gap_products = [p for p in gap_details if p["match_status"] == "差距匹配"]
+            if gap_products:
+                st.subheader("📋 各产品差距明细")
+                for gp in gap_products:
+                    with st.expander(f"{gp['product']}（{gp['bank']}）— {gp['product_type']}"):
+                        if gp["gaps"]:
+                            gap_table = []
+                            for g in gp["gaps"]:
+                                gap_table.append({
+                                    "差距项": g["item"],
+                                    "当前值": g["current"],
+                                    "准入要求": g["required"],
+                                    "差距量": f"{g['gap_size']:.1f}" if isinstance(g['gap_size'], (int, float)) else g['gap_size'],
+                                    "提升难度": g["difficulty"],
+                                })
+                            st.dataframe(pd.DataFrame(gap_table), hide_index=True)
+                            st.caption(f"💡 最容易补齐：{gp['closest_to_qualify']}")
+                        else:
+                            st.info("该产品已达标")
+
+            # 总结
+            summary = gap_result.get("summary", "")
+            if summary:
+                st.subheader("📝 总结")
+                st.markdown(summary)
+
+        except Exception as e:
+            st.error(f"差距分析出错：{e}")
 
         # ======================== 报告下载 ========================
         st.markdown("---")
