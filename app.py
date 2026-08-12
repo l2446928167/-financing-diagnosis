@@ -4,6 +4,8 @@ import re
 import os
 from dotenv import load_dotenv, set_key
 
+APP_VERSION = "v1.2-fix2 (2026-08-12)"
+
 # 加载 .env（用于本地保存 API Key）
 load_dotenv()
 saved_api_key = os.environ.get("DEEPSEEK_API_KEY", "")
@@ -15,18 +17,15 @@ st.markdown("上传企业财务数据，获取健康诊断与信贷产品匹配�
 # ======================== 侧边栏 ========================
 with st.sidebar:
     st.header("⚙️ 配置区")
+    st.caption(f"版本：{APP_VERSION}")
     api_key = st.text_input("请输入 API Key", type="password", value=saved_api_key)
     model = st.selectbox("选择模型", ["DeepSeek-V4-Flash"])
 
     if st.button("💾 保存 API Key 到本地"):
         if api_key:
-            try:
-                env_path = os.path.join(os.path.dirname(__file__), ".env")
-                set_key(env_path, "DEEPSEEK_API_KEY", api_key)
-                st.success("API Key 已保存，下次启动自动加载。")
-            except Exception as e:
-                # Streamlit Community Cloud 容器文件系统是临时的，重启后 .env 会丢失
-                st.warning(f"保存失败（{e}）。云端部署时 Key 仅在本次会话内有效。")
+            env_path = os.path.join(os.path.dirname(__file__), ".env")
+            set_key(env_path, "DEEPSEEK_API_KEY", api_key)
+            st.success("API Key 已保存，下次启动自动加载。")
         else:
             st.warning("请先输入 API Key")
 
@@ -35,26 +34,19 @@ with st.sidebar:
 
     # 测试 API 连接按钮
     if st.button("🔌 测试 API 连接"):
-        try:
-            from openai import OpenAI
-            import httpx
-            client = OpenAI(
-                api_key=api_key,
-                base_url="https://api.deepseek.com",
-                timeout=httpx.Timeout(30.0, connect=10.0)
-            )
-            response = client.chat.completions.create(
-                model="deepseek-v4-flash",
-                messages=[
-                    {"role": "system", "content": "You are a helper."},
-                    {"role": "user", "content": "回复OK"}
-                ],
-                max_tokens=10
-            )
-            content = response.choices[0].message.content
-            st.success(f"连接成功！返回：{content}")
-        except Exception as e:
-            st.error(f"测试失败：{type(e).__name__} – {e}")
+        from utils.llm_helper import test_api_connection
+        with st.spinner("正在测试连接..."):
+            ok, msg = test_api_connection(api_key)
+            if ok:
+                st.success(msg)
+            else:
+                st.error(msg)
+
+    # 显示 API Key 状态
+    if api_key:
+        st.markdown(f"🔑 API Key 已填写（{api_key[:6]}...{api_key[-4:]}）")
+    else:
+        st.warning("⚠️ 未填写 API Key，AI 功能不可用")
 
 # ======================== 初始化 session_state ========================
 if "metrics" not in st.session_state:
@@ -65,6 +57,8 @@ if "df" not in st.session_state:
     st.session_state.df = None
 if "diagnosis_result" not in st.session_state:
     st.session_state.diagnosis_result = None
+if "ai_extracted" not in st.session_state:
+    st.session_state.ai_extracted = False
 
 # ======================== 辅助函数 ========================
 def generate_diagnosis_text(full_metrics, dims, overall, model_choice, api_key):
@@ -113,14 +107,7 @@ st.header("📤 第一步：上传企业财务数据")
 uploaded_file = st.file_uploader("支持 PDF / Excel / CSV 格式", type=["pdf", "xlsx", "xls", "csv"])
 
 if uploaded_file is not None:
-    # 导入数据解析模块
     from modules.data_input import parse_financial_data, auto_extract_metrics
-
-    # 更换了上传文件时，重置 AI 提取标记，避免沿用上一个文件的指标
-    file_sig = (uploaded_file.name, uploaded_file.size)
-    if st.session_state.get("_file_sig") != file_sig:
-        st.session_state._file_sig = file_sig
-        st.session_state.pop("ai_extracted", None)
 
     with st.spinner("正在解析文件..."):
         try:
@@ -128,16 +115,37 @@ if uploaded_file is not None:
             st.session_state.raw_text = raw_text
             st.session_state.df = df
             # 如果 AI 已提取过指标，不覆盖（防止 rerun 时被正则结果冲掉）
-            if "ai_extracted" not in st.session_state:
+            if not st.session_state.ai_extracted:
                 extracted = auto_extract_metrics(raw_text, df)
                 st.session_state.metrics = extracted
-            st.success("文件解析完成！")
+                st.success("文件解析完成！")
+            else:
+                st.success("文件解析完成！（保留 AI 提取结果）")
         except Exception as e:
             st.error(f"解析失败：{e}")
             st.stop()
 
+    # 显示文件类型信息
+    file_type = uploaded_file.name.split(".")[-1].lower()
+    type_info = {"pdf": "📄 PDF文件", "xlsx": "📊 Excel文件", "xls": "📊 Excel文件", "csv": "📊 CSV文件"}
+    has_text = bool(raw_text and raw_text.strip())
+    has_df = df is not None
+    status_parts = [type_info.get(file_type, "📁 文件")]
+    if has_text:
+        status_parts.append(f"文本 {len(raw_text)} 字符")
+    if has_df:
+        status_parts.append(f"表格 {df.shape[0]}行×{df.shape[1]}列")
+    if not has_text and not has_df:
+        status_parts.append("⚠️ 未提取到可读内容")
+    st.info(" ｜ ".join(status_parts))
+
     # 显示并允许手动修正指标
-    st.subheader("📊 自动提取的关键财务指标（可手动修正）")
+    if st.session_state.ai_extracted:
+        st.subheader("🤖 AI 提取的关键财务指标（可手动修正）")
+        st.caption("以下指标由 AI 智能提取，比正则匹配更精准。")
+    else:
+        st.subheader("📊 自动提取的关键财务指标（可手动修正）")
+
     col1, col2, col3 = st.columns(3)
     updated_metrics = {}
     keys = list(st.session_state.metrics.keys())
@@ -152,8 +160,14 @@ if uploaded_file is not None:
 
     # AI 智能提取按钮
     if st.session_state.get('api_key'):
-        if st.button("🤖 AI 智能提取财务指标"):
-            with st.spinner("AI 正在分析文件内容..."):
+        col_btn1, col_btn2 = st.columns([1, 3])
+        with col_btn1:
+            ai_clicked = st.button("🤖 AI 智能提取财务指标", type="primary")
+        with col_btn2:
+            if st.session_state.ai_extracted:
+                st.success("✅ 已使用 AI 提取结果（点击按钮可重新提取）")
+        if ai_clicked:
+            with st.spinner("AI 正在分析文件内容，请稍候..."):
                 try:
                     from modules.data_input import llm_extract_metrics
                     from utils.llm_helper import call_llm
@@ -165,19 +179,32 @@ if uploaded_file is not None:
                         call_llm
                     )
                     if ai_metrics:
-                        # 清除旧的指标输入框缓存，让 AI 提取的新值在 rerun 后正确显示
-                        for k in list(ai_metrics.keys()):
-                            st.session_state.pop(f"metric_{k}", None)
+                        # 记录AI提取前的结果，用于对比
+                        old_metrics = dict(st.session_state.metrics)
                         st.session_state.metrics = ai_metrics
-                        st.session_state.ai_extracted = True  # 标记已AI提取，rerun后不覆盖
-                        st.success("AI 提取完成！")
+                        st.session_state.ai_extracted = True
+                        # 计算差异
+                        changes = []
+                        for k in ai_metrics:
+                            old_val = old_metrics.get(k, "")
+                            new_val = ai_metrics.get(k, "")
+                            if old_val != new_val and new_val:
+                                changes.append(f"{k}: {old_val or '(空)'} → {new_val}")
+                        if changes:
+                            st.success(f"✅ AI 提取完成！更新了 {len(changes)} 个指标")
+                            with st.expander("📋 查看AI提取的变更"):
+                                for c in changes:
+                                    st.markdown(f"- `{c}`")
+                        else:
+                            st.info("AI 提取完成，结果与自动提取一致。")
                         st.rerun()
                     else:
-                        st.error("AI 提取失败，请查看上方错误信息。")
+                        st.error("❌ AI 提取未能获得有效结果，请查看上方提示信息。")
                 except Exception as e:
                     import traceback
                     st.error(f"AI 提取时发生异常：{type(e).__name__} – {e}")
-                    st.text_area("详细错误跟踪", traceback.format_exc(), height=200)
+                    with st.expander("查看详细错误跟踪"):
+                        st.code(traceback.format_exc())
     else:
         st.info("💡 在侧边栏配置 API Key 后可使用 AI 智能提取财务指标。")
 

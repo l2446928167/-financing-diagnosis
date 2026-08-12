@@ -2,11 +2,6 @@
 模块1：企业数据录入
 支持上传 PDF / Excel / CSV 文件，提取关键财务指标。
 包含规则提取和 LLM 智能提取（分块处理长文本、目录引导、详细错误提示）。
-
-【修复说明】原分块逻辑在文本长度超过 CHUNK_SIZE 时，最后一个分块抵达文本末尾后
-start = end - OVERLAP 会使 start 永远停留在 text_len - OVERLAP，导致 while 死循环，
-chunks 列表无限增长 → 进程内存耗尽被系统强杀（表现为 "Oh no. Error running app."）。
-修复方式：当 end 已达文本末尾时直接 break。
 """
 import pandas as pd
 import PyPDF2
@@ -54,7 +49,6 @@ def parse_financial_data(uploaded_file):
     file_type = uploaded_file.name.split(".")[-1].lower()
     raw_text = ""
     df = None
-
     if file_type == "csv":
         df = extract_from_csv(uploaded_file)
     elif file_type in ["xls", "xlsx"]:
@@ -63,7 +57,6 @@ def parse_financial_data(uploaded_file):
         raw_text = extract_from_pdf(uploaded_file)
     else:
         raise ValueError(f"不支持的文件格式：{file_type}")
-
     return raw_text, df
 
 
@@ -83,7 +76,6 @@ def auto_extract_metrics(raw_text, df):
         "流动比率": "",
         "资产负债率": ""
     }
-
     # 如果DataFrame存在，尝试从列名匹配
     if df is not None:
         col_map = {col.lower(): col for col in df.columns}
@@ -94,7 +86,6 @@ def auto_extract_metrics(raw_text, df):
                     val = df[col_map[name]].dropna().iloc[0] if not df[col_map[name]].dropna().empty else ""
                     metrics[key] = str(val)
                     break
-
     # 如果从PDF提取了文本，尝试用关键词+数字正则提取（简化版）
     if raw_text:
         for key in metrics:
@@ -103,7 +94,6 @@ def auto_extract_metrics(raw_text, df):
                 match = re.search(pattern, raw_text)
                 if match:
                     metrics[key] = match.group(1)
-
     return metrics
 
 
@@ -139,8 +129,11 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
         st.warning("API Key 未填写，无法使用 AI 提取。")
         return None
 
+    api_called = False  # 追踪是否实际调用了API
+
     # 优先处理表格数据
     if df is not None:
+        st.info("📊 检测到表格数据，正在用 AI 分析表格...")
         csv_str = df.head(50).to_csv(index=False)
         prompt = f"""从以下表格中提取财务指标（单位：万元）。输出JSON：
 {{"总资产":"", "总负债":"", "营业收入":"", "净利润":"", "应收账款":"", "短期借款":"", "流动比率":"", "资产负债率":""}}
@@ -150,87 +143,111 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
             "你是财务数据提取器，仅输出JSON。",
             prompt, model_choice, api_key, temperature=0.1, max_tokens=800
         )
+        api_called = True
         if resp:
-            return parse_metrics_response(resp)
+            result = parse_metrics_response(resp)
+            if result:
+                st.success("✅ AI 从表格中提取成功！")
+                return result
+            else:
+                st.warning("AI 返回了结果但解析失败，尝试其他方式...")
+        else:
+            st.warning("AI 表格提取未返回结果，尝试其他方式...")
 
-    if not raw_text:
-        st.warning("没有可提取的文本内容。")
-        return None
+    # 文本提取
+    if raw_text and raw_text.strip():
+        raw_text = raw_text.strip()
+        text_len = len(raw_text)
 
-    raw_text = raw_text.strip()
-    text_len = len(raw_text)
+        # 短文本直接提取
+        if text_len <= 20000:
+            st.info(f"📝 文本长度 {text_len} 字符，正在用 AI 直接提取...")
+            prompt = f"从财报文本中提取财务指标（单位：万元）：\n{raw_text}\n输出JSON。"
+            resp = call_llm_func(
+                "你是财务提取器，仅输出JSON。",
+                prompt, model_choice, api_key, temperature=0.1, max_tokens=800
+            )
+            api_called = True
+            if resp:
+                result = parse_metrics_response(resp)
+                if result:
+                    st.success("✅ AI 从文本中提取成功！")
+                    return result
+                else:
+                    st.warning("AI 返回了结果但解析失败。")
+            else:
+                st.warning("AI 文本提取未返回结果。")
 
-    # 短文本直接提取
-    if text_len <= 20000:
-        st.info(f"文本长度 {text_len} 字符，直接提取...")
-        prompt = f"从财报文本中提取财务指标（单位：万元）：\n{raw_text}\n输出JSON。"
-        resp = call_llm_func(
-            "你是财务提取器，仅输出JSON。",
-            prompt, model_choice, api_key, temperature=0.1, max_tokens=800
-        )
-        return parse_metrics_response(resp)
+        # 长文本分块处理
+        else:
+            CHUNK_SIZE = 18000
+            OVERLAP = 500
+            st.info(f"📄 文本较长（{text_len}字符），分块提取摘要后再整合，预计30-60秒...")
+            chunks = []
+            start = 0
+            while start < text_len:
+                end = min(start + CHUNK_SIZE, text_len)
+                chunks.append(raw_text[start:end])
+                if end >= text_len:
+                    break
+                start = end - OVERLAP
 
-    # 长文本分块处理
-    CHUNK_SIZE = 18000
-    OVERLAP = 500
-    st.info(f"文本较长（{text_len}字符），分块提取摘要后再整合，预计30-60秒...")
+            total_chunks = len(chunks)
+            st.write(f"共 {total_chunks} 块，正在逐块提取财务摘要...")
+            progress_bar = st.progress(0)
+            summaries = []
 
-    # 分块（修复：end 到达文本末尾后必须 break，否则死循环）
-    chunks = []
-    start = 0
-    while start < text_len:
-        end = min(start + CHUNK_SIZE, text_len)
-        chunks.append(raw_text[start:end])
-        if end >= text_len:
-            break
-        start = end - OVERLAP
-
-    total_chunks = len(chunks)
-    st.write(f"共 {total_chunks} 块，正在逐块提取财务摘要...")
-    progress_bar = st.progress(0)
-
-    summaries = []
-    for i, chunk in enumerate(chunks):
-        chunk_prompt = f"""从以下财报片段中提取所有出现的财务关键数字（如总资产、负债、营收、净利润、应收账款等），
+            for i, chunk in enumerate(chunks):
+                chunk_prompt = f"""从以下财报片段中提取所有出现的财务关键数字（如总资产、负债、营收、净利润、应收账款等），
 用简洁中文列出，保留原始数值和单位。不要输出JSON。
 片段：
 {chunk}"""
-        summary = call_llm_func(
-            "你是财务摘要员，提取关键数字，用中文列出。",
-            chunk_prompt, model_choice, api_key, temperature=0.1, max_tokens=600
-        )
-        if summary:
-            summaries.append(f"第{i+1}块摘要：\n{summary}")
-        else:
-            summaries.append(f"第{i+1}块：提取失败")
-        progress_bar.progress((i+1)/total_chunks)
+                summary = call_llm_func(
+                    "你是财务摘要员，提取关键数字，用中文列出。",
+                    chunk_prompt, model_choice, api_key, temperature=0.1, max_tokens=600
+                )
+                api_called = True
+                if summary:
+                    summaries.append(f"第{i+1}块摘要：\n{summary}")
+                else:
+                    summaries.append(f"第{i+1}块：提取失败")
+                progress_bar.progress((i+1)/total_chunks)
 
-    # 合并摘要
-    condensed = "\n---\n".join(summaries)
-    if len(condensed) > 30000:
-        compress_prompt = f"将以下多段财务摘要整合为一份完整的财务事实清单，保留所有关键数字：\n{condensed}"
-        compressed = call_llm_func(
-            "你是财务整合员，生成一份完整的财务事实清单。",
-            compress_prompt, model_choice, api_key, temperature=0.1, max_tokens=1000
-        )
-        if compressed:
-            condensed = compressed
+            # 合并摘要
+            condensed = "\n---\n".join(summaries)
+            if len(condensed) > 30000:
+                compress_prompt = f"将以下多段财务摘要整合为一份完整的财务事实清单，保留所有关键数字：\n{condensed}"
+                compressed = call_llm_func(
+                    "你是财务整合员，生成一份完整的财务事实清单。",
+                    compress_prompt, model_choice, api_key, temperature=0.1, max_tokens=1000
+                )
+                api_called = True
+                if compressed:
+                    condensed = compressed
 
-    # 最终提取
-    st.write("正在从浓缩信息中提取最终指标...")
-    final_prompt = f"""根据以下浓缩财务信息，提取关键财务指标（单位：万元，百分比保留%）。
+            # 最终提取
+            st.write("正在从浓缩信息中提取最终指标...")
+            final_prompt = f"""根据以下浓缩财务信息，提取关键财务指标（单位：万元，百分比保留%）。
 浓缩信息：
 {condensed}
-
 输出严格JSON：
 {{"总资产":"", "总负债":"", "营业收入":"", "净利润":"", "应收账款":"", "短期借款":"", "流动比率":"", "资产负债率":""}}"""
-    final_resp = call_llm_func(
-        "你是财务提取器，仅输出JSON。",
-        final_prompt, model_choice, api_key, temperature=0.1, max_tokens=800
-    )
+            final_resp = call_llm_func(
+                "你是财务提取器，仅输出JSON。",
+                final_prompt, model_choice, api_key, temperature=0.1, max_tokens=800
+            )
+            api_called = True
+            if final_resp:
+                result = parse_metrics_response(final_resp)
+                if result:
+                    st.success("✅ AI 长文本提取成功！")
+                    return result
 
-    if final_resp:
-        return parse_metrics_response(final_resp)
+    # 如果既没有表格也没有文本
+    if not api_called:
+        st.error("⚠️ 无法调用 AI：文件中没有可提取的文本或表格数据。")
+        st.info("💡 提示：如果是扫描件PDF，请先转换为可搜索PDF或Excel格式后再上传。")
     else:
-        st.error("最终提取失败，大模型未返回有效结果。请检查上方是否有红色错误提示。")
-        return None
+        st.error("AI 提取未能获得有效结果，请检查上方的错误信息。")
+
+    return None
