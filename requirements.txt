@@ -1,8 +1,8 @@
-streamlit==1.61.1
-pandas==2.2.3
-openpyxl==3.1.5
-PyPDF2==3.0.1
-reportlab==5.0.0
-openai==2.53.0
-python-dotenv==1.2.2
-httpx==0.28.1
+streamlit
+pandas
+openpyxl
+PyPDF2
+reportlab
+openai
+python-dotenv
+httpx
