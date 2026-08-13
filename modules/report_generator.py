@@ -32,12 +32,15 @@ CN_FANGSONG = reg('FangSong', 'fangsong.ttf') if os.path.exists(os.path.join(FON
 # 我们让系统更稳健：如果注册失败，自动使用 Helvetica，但中文会乱码，所以尽量确保 fonts 上传
 def generate_pdf(metrics, diagnosis_result, matches, product_df,
                  ai_summary=None, ai_risks=None, ai_suggestions=None,
-                 ai_recommendation=None):
+                 ai_recommendation=None, rag_citations=None, rag_asof=None):
     """
     参数新增：
         ai_summary: AI 生成的总体评价文本
         ai_risks: AI 生成的风险点文本（多行，每行以"- "开头）
         ai_suggestions: AI 生成的改善建议文本（多行，每行以"- "开头）
+        rag_citations: v1.6 RAG 政策依据清单（list[str]，已含"条款摘编"标注，
+                       且已按审查要求去除 URL 防破版）
+        rag_asof: 检索截至日期（YYYY-MM-DD）
     """
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -170,6 +173,17 @@ def generate_pdf(metrics, diagnosis_result, matches, product_df,
         for sug in suggestions:
             elements.append(Paragraph(f"• {sug}", body_style))
     elements.append(Spacer(1, 8*mm))
+
+    # v1.6：政策与产品依据（RAG 溯源；条款摘编标注，来源机构+条款号，不列长 URL 防破版）
+    if rag_citations:
+        elements.append(Paragraph("附录：政策与产品依据", h1_style))
+        for c in rag_citations:
+            elements.append(Paragraph(f"• {c}", note_style))
+        elements.append(Paragraph(
+            "以上均为条款摘编，非法规全文镜像，请以官方原文为准。"
+            + (f"检索截至 {rag_asof}。" if rag_asof else ""),
+            note_style))
+        elements.append(Spacer(1, 5*mm))
 
     # 免责声明
     elements.append(HRFlowable(width="100%", thickness=1, color=colors.grey))

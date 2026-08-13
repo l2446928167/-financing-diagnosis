@@ -4,7 +4,7 @@ import re
 import os
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "v1.5.1 (2026-08-12)"
+APP_VERSION = "v1.6 (2026-08-13)"
 
 # 加载 .env（用于本地保存 API Key）
 load_dotenv()
@@ -106,6 +106,16 @@ def generate_diagnosis_text(full_metrics, dims, overall, model_choice, api_key):
     user_prompt += f"\n总体健康评分：{overall}/10"
 
     return call_llm(system_prompt, user_prompt, model_choice, api_key)
+
+def _to_num(v):
+    """把指标输入框的字符串安全转成 float：去千分位逗号与非法后缀，失败为 0"""
+    import re as _re
+    try:
+        cleaned = _re.sub(r'[^\d.\-]', '', str(v).replace(",", "").replace("，", ""))
+        return float(cleaned) if cleaned else 0.0
+    except (ValueError, TypeError):
+        return 0.0
+
 
 # ======================== 模块1：数据录入 ========================
 st.header("📤 第一步：上传企业财务数据")
@@ -358,12 +368,19 @@ if uploaded_file is not None:
         )
 
     # v1.5.1 新增：抵押能力（影响需抵押物产品的匹配与差距分析）
-    col_cr7, col_cr8 = st.columns([1, 2])
+    col_cr7, col_cr8 = st.columns(2)
     with col_cr7:
         can_collateral = st.selectbox(
             "是否可提供抵押/担保",
             ["可提供", "暂无法提供"],
             help="影响需要抵押物的产品匹配（如应收账款质押贷、政策性担保贷）"
+        )
+    with col_cr8:
+        # v1.6 新增：行业周期信号（ML 隐藏因子的生产输入，演示阶段人工录入；
+        # 正式版接行业景气度/宏观数据源）
+        industry_cycle = st.slider(
+            "行业周期信号（ML 外部输入）", -1.0, 1.0, 0.0, 0.1,
+            help="-1=行业深度下行，0=平稳，1=高度景气。正式版将由行业景气度数据自动接入"
         )
 
     # ======================== 诊断按钮 ========================
@@ -401,6 +418,8 @@ if uploaded_file is not None:
             "净利润增长率": profit_growth_rate,
             # v1.5.1 新增
             "可提供抵押": can_collateral == "可提供",
+            # v1.6 新增
+            "行业周期信号": industry_cycle,
         }
 
         result = diagnose(full_metrics)
@@ -435,6 +454,36 @@ if uploaded_file is not None:
                 with row2_cols[i - 4]:
                     st.metric(dim, f"{dims[dim]}/10")
                     st.markdown(lights[dim])
+
+        # ======================== v1.6 双轨对照（规则卡 × ML） ========================
+        st.subheader("🧠 双轨对照：规则卡 × ML 违约模型")
+        try:
+            from modules.ml_model import (predict_default_proba, dual_track_conclusion,
+                                          explain_statement)
+            # 构造 ML 输入：数值字段清洗为 float，分类字段原样（隐藏因子=行业周期滑块）
+            _CATEGORICAL = {"纳税信用评级", "实控人征信状态", "法院执行记录",
+                            "客户集中度", "行业", "可提供抵押"}
+            statement = {k: (v if k in _CATEGORICAL else _to_num(v))
+                         for k, v in full_metrics.items()}
+            proba = predict_default_proba(statement)
+            conclusion, tag = dual_track_conclusion(result['overall_score'], proba)
+            col_m1, col_m2 = st.columns([1, 3])
+            with col_m1:
+                st.metric("ML 违约概率", "不可用" if proba is None else f"{proba * 100:.1f}%")
+            with col_m2:
+                st.markdown(f"**双轨结论**：{conclusion}")
+            contribs = explain_statement(statement)
+            if contribs:
+                with st.expander("SHAP 归因（各因子对违约概率的贡献方向与强度）"):
+                    shap_rows = sorted(
+                        ((k, v) for k, v in contribs.items() if k not in ("bias", "违约概率")),
+                        key=lambda kv: -abs(kv[1]))
+                    df_shap = pd.DataFrame({"因子": [k for k, _ in shap_rows],
+                                            "贡献": [round(v, 3) for _, v in shap_rows]})
+                    st.bar_chart(df_shap.set_index("因子"))
+                    st.caption("正值推高违约概率、负值拉低。模型为合成数据方法论演示，仅供对照参考。")
+        except Exception as e:
+            st.warning(f"双轨模块不可用，已降级为单轨规则卡：{e}")
 
         # LLM 增强诊断文本
         llm_text = generate_diagnosis_text(
@@ -662,12 +711,30 @@ if uploaded_file is not None:
                 if suggestions_match:
                     ai_suggestions_text = suggestions_match.group(1).strip()
 
+            # v1.6：RAG 政策依据（自动检索政策语料，随报告落库；条款摘编标注）
+            rag_report_citations = []
+            rag_report_asof = ""
+            try:
+                from utils.vector_store import load_index, retrieve
+                _idx = load_index("knowledge/rag_corpus/bm25_index.json")
+                _phits = retrieve(_idx, "小微企业融资政策支持", k=3, category="policy")
+                rag_report_citations = [
+                    f"{h['title']}（{h['source']}）{(' ' + h['clause']) if h.get('clause') else ''}（条款摘编）"
+                    for h in _phits]
+                import json as _json
+                with open("knowledge/rag_corpus/bm25_index.json", encoding="utf-8") as _f:
+                    rag_report_asof = _json.load(_f).get("meta", {}).get("asof", "")
+            except Exception:
+                pass
+
             pdf_buffer = generate_pdf(
                 full_metrics, result, matches, df_all,
                 ai_summary=ai_summary_text,
                 ai_risks=ai_risks_text,
                 ai_suggestions=ai_suggestions_text,
-                ai_recommendation=ai_recommendation_text
+                ai_recommendation=ai_recommendation_text,
+                rag_citations=rag_report_citations,
+                rag_asof=rag_report_asof
             )
             st.download_button(
                 label="📥 下载 PDF 报告",
@@ -691,3 +758,55 @@ try:
 except Exception as e:
     st.error(f"产品库加载失败：{e}")
 st.caption("数据来源：各银行官网，采集日期见表中字段。")
+
+# ======================== v1.6 政策/产品智能问答（RAG） ========================
+st.markdown("---")
+st.header("📚 政策/产品智能问答（可溯源）")
+try:
+    from utils.vector_store import load_index, retrieve, grounded_answer
+    from utils.llm_helper import call_llm as rag_call_llm
+
+    @st.cache_resource
+    def _load_rag():
+        import json
+        idx = load_index("knowledge/rag_corpus/bm25_index.json")
+        try:
+            with open("knowledge/rag_corpus/bm25_index.json", encoding="utf-8") as f:
+                meta = json.load(f).get("meta", {})
+        except Exception:
+            meta = {}
+        return idx, meta
+
+    rag_index, rag_meta = _load_rag()
+    rcol1, rcol2 = st.columns([3, 1])
+    with rcol1:
+        rag_query = st.text_input("问题", key="rag_query",
+                                  placeholder="例：科技型小微企业无抵押能贷多少？")
+    with rcol2:
+        rag_cat = st.selectbox("语料范围", ["全部", "政策", "产品", "研报"], key="rag_cat")
+    cat_map = {"全部": None, "政策": "policy", "产品": "product", "研报": "research"}
+    if st.button("🔎 检索回答", key="rag_ask") and rag_query.strip():
+        hits = retrieve(rag_index, rag_query.strip(), k=5, category=cat_map[rag_cat])
+        if not hits:
+            st.info("该问题未被本模块语料收录（诚实返回空，不编造）。可改问信贷产品或普惠政策，或查看上方产品库。")
+        else:
+            use_mock = not st.session_state.get("api_key")
+
+            def _rag_llm(prompt, temperature=0):
+                return rag_call_llm("你是小微金融政策与银行产品问答助手，仅基于给定资料回答。",
+                                    prompt, st.session_state.model, st.session_state.api_key,
+                                    temperature=temperature, max_tokens=600)
+
+            ans = grounded_answer(None if use_mock else _rag_llm, rag_query.strip(), hits,
+                                  use_mock=use_mock)
+            if use_mock:
+                st.caption("未配置 API Key：当前展示检索片段（配置后由 DeepSeek 做溯源生成）")
+            if ans.text:
+                st.markdown(ans.text)
+            with st.expander(f"📖 参考清单（{len(ans.citations)} 条；政策条目为条款摘编）", expanded=True):
+                for c in ans.citations:
+                    st.markdown(f"- {c}")
+            if rag_meta.get("asof"):
+                st.caption(f"检索截至 {rag_meta['asof']} ｜ 产品库指纹 {str(rag_meta.get('products_csv_sha256', ''))[:12]}…")
+except Exception as e:
+    st.warning(f"RAG 模块不可用：{e}")
