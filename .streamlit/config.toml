@@ -1,0 +1,8 @@
+# Streamlit 主题配置（v2.0 新增）
+# 设计令牌：金融深青蓝主色 + 浅灰页面底 + 白卡片；语义红黄绿仅用于诊断徽章（在 ui_style.py 中定义）。
+[theme]
+primaryColor = "#1F4E79"
+backgroundColor = "#F7F8FA"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#374151"
+font = "sans serif"
