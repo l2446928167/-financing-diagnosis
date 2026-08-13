@@ -47,10 +47,18 @@ def load_model():
             _MODEL_CACHE.update(model=None, meta=None)
             return None, None
         xgb = _lazy_import_xgb()
-        booster = xgb.Booster()
-        booster.load_model(MODEL_PATH)
         with open(META_PATH, encoding="utf-8") as f:
             meta = json.load(f)
+        # 审查 P1-2：xgboost 主版本不一致时降级为纯规则卡（跨主版本 JSON 格式可能漂移）
+        train_ver = str(meta.get("xgboost_version", ""))
+        run_ver = getattr(xgb, "__version__", "")
+        if train_ver.split(".")[0] != run_ver.split(".")[0]:
+            print(f"[ml_model] 警告：模型由 xgboost {train_ver} 训练，当前运行 {run_ver}，"
+                  "主版本不一致，降级为纯规则卡")
+            _MODEL_CACHE.update(model=None, meta=None)
+            return None, None
+        booster = xgb.Booster()
+        booster.load_model(MODEL_PATH)
         _MODEL_CACHE.update(model=booster, meta=meta)
         return booster, meta
     except Exception:
@@ -65,8 +73,9 @@ def statement_to_features(statement):
     statement 中必须含"行业周期信号"（生产环境接行业景气度数据源；
     演示环境可用人工录入的 -1~1 评分）。
     """
-    A = float(statement["总资产"]); L = float(statement["总负债"])
-    R = float(statement["营业收入"])
+    A = float(statement.get("总资产", 0) or 0)
+    L = float(statement.get("总负债", 0) or 0)
+    R = float(statement.get("营业收入", 0) or 0)
     feats = {
         "资产负债率": L / A if A > 0 else 0.0,
         "流动比率": float(statement.get("流动资产", 0)) / max(float(statement.get("流动负债", 1)), 1e-6),
@@ -112,7 +121,9 @@ def explain_statement(statement):
     margin = float(contribs.sum())
     p = 1.0 / (1.0 + math.exp(-margin))
     p_direct = float(booster.predict(dm)[0])
-    assert abs(p - p_direct) < 1e-5, "SHAP 贡献求和与模型概率不一致"
+    # 审查 P1-1：运行时不变量用显式 raise（assert 在 python -O 下会被剥离）
+    if abs(p - p_direct) >= 1e-5:
+        raise RuntimeError("SHAP 贡献求和与模型概率不一致")
     out = {name: float(contribs[i]) for i, name in enumerate(FEATURE_NAMES)}
     out["bias"] = float(contribs[-1])
     out["违约概率"] = p_direct
@@ -124,6 +135,8 @@ def dual_track_conclusion(rule_score, proba):
     双轨对照组合结论（口径与 app.py 红黄绿灯一致）。
     proba 为 None 时返回规则卡单轨结论。
     """
+    # 审查 P2-4 口径说明：本函数是三级结论分级（低/中/高危，0.60 用于强拒绝），
+    # 与训练端 divergence_stats 的二分分歧口径（0.50/0.35）用途不同，非同一套阈值。
     meta_green, meta_red = 7.0, 4.0
     ml_high, ml_low = 0.50, 0.35
     if proba is None:
