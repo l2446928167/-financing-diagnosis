@@ -6,3 +6,4 @@ reportlab
 openai
 python-dotenv
 httpx
+xgboost
