@@ -574,7 +574,7 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
     3. 长文本分块提取摘要 → 合并浓缩 → 最终提取
     """
     if not api_key:
-        st.warning("API Key 未填写，无法使用 AI 提取。")
+        st.warning("未配置 API Key，无法使用智能提取。")
         return None
 
     api_called = False  # 追踪是否实际调用了API
@@ -582,7 +582,7 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
 
     # 优先处理表格数据
     if df is not None:
-        st.info("📊 检测到表格数据，正在用 AI 分析表格...")
+        st.info("检测到表格数据，正在用智能分析表格...")
         csv_str = df.head(50).to_csv(index=False)
         prompt = f"""从以下表格中提取财务指标。
 每个字段需包含：value（数值）、unit（单位：元/万元/亿元，若表头有单位则填入）、page（来源页码，表格填""）。
@@ -603,7 +603,7 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
                 normalize_units(result)
                 verification = verify_accounting(result)
                 result["__verification__"] = verification
-                st.success("✅ AI 从表格中提取成功！")
+                st.success("已从表格中提取成功！")
                 return result
             else:
                 st.warning("AI 返回了结果但解析失败，尝试其他方式...")
@@ -617,7 +617,7 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
 
         # 短文本直接提取
         if text_len <= 20000:
-            st.info(f"📝 文本长度 {text_len} 字符，正在用 AI 直接提取...")
+            st.info(f"文本长度 {text_len} 字符，正在用智能直接提取...")
             prompt = f"""从财报文本中提取财务指标。
 每个字段需包含：value（数值）、unit（单位：元/万元/亿元）、page（来源页码，如"3"表示第3页）。
 务必标注单位（元/万元/亿元）和来源页码。
@@ -636,11 +636,11 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
                     # v1.5：二次补提+归一化+校验
                     supp = _supplement_missing_metrics(result, raw_text_stripped)
                     if supp > 0:
-                        st.info(f"🔧 已补提 {supp} 个字段")
+                        st.info(f"已补提 {supp} 个字段")
                     normalize_units(result)
                     verification = verify_accounting(result)
                     result["__verification__"] = verification
-                    st.success("✅ AI 从文本中提取成功！")
+                    st.success("已从文本中提取成功！")
                     return result
                 else:
                     st.warning("AI 返回了结果但解析失败。")
@@ -651,7 +651,7 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
         else:
             CHUNK_SIZE = 18000
             OVERLAP = 500
-            st.info(f"📄 文本较长（{text_len}字符），分块提取摘要后再整合，预计30-60秒...")
+            st.info(f"文本较长（{text_len}字符），分块提取摘要后再整合，预计30-60秒...")
             chunks = []
             start = 0
             while start < text_len:
@@ -708,7 +708,7 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
 每个字段需包含：value（数值）、unit（单位：元/万元/亿元，百分比字段unit填""）、page（来源页码，如"3"表示第3页）。
 务必标注单位（元/万元/亿元）和来源页码。
 
-⚠️ 校验规则：
+校验规则：
 1. 如果某个字段在原始财报中确实为0或空（如"短期借款"行显示为空或无余额），则value输出"0"，不要从上下文猜测或推断一个值。
 2. "总负债"应优先查找"负债合计"关键字的值。
 3. "流动比率"如果财报中没有直接给出，但有"流动资产合计"和"流动负债合计"的值，则计算 流动资产÷流动负债 并在value后标注"(计算值)"；如果两者均无，则value输出空字符串。
@@ -729,17 +729,17 @@ def llm_extract_metrics(raw_text, df, model_choice, api_key, call_llm_func):
                     # v1.5：二次补提+归一化+校验
                     supp = _supplement_missing_metrics(result, raw_text_stripped)
                     if supp > 0:
-                        st.info(f"🔧 已补提 {supp} 个字段")
+                        st.info(f"已补提 {supp} 个字段")
                     normalize_units(result)
                     verification = verify_accounting(result)
                     result["__verification__"] = verification
-                    st.success("✅ AI 长文本提取成功！")
+                    st.success("长文本提取成功！")
                     return result
 
     # 如果既没有表格也没有文本
     if not api_called:
-        st.error("⚠️ 无法调用 AI：文件中没有可提取的文本或表格数据。")
-        st.info("💡 提示：如果是扫描件PDF，请先转换为可搜索PDF或Excel格式后再上传。")
+        st.error("无法调用智能提取：文件中没有可提取的文本或表格数据。")
+        st.info("提示：如果是扫描件PDF，请先转换为可搜索PDF或Excel格式后再上传。")
     else:
         st.error("AI 提取未能获得有效结果，请检查上方的错误信息。")
 
