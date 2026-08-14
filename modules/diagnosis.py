@@ -532,11 +532,11 @@ def score_credit_financing(metrics):
 def traffic_light(score):
     """红黄绿灯：>=7绿，4~7黄，<4红"""
     if score >= 7:
-        return "🟢 绿色"
+        return "绿色"
     elif score >= 4:
-        return "🟡 黄色"
+        return "黄色"
     else:
-        return "🔴 红色"
+        return "红色"
 
 
 def generate_risks_and_suggestions(metrics, scores):
