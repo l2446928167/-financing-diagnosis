@@ -74,7 +74,7 @@ def generate_pdf(metrics, diagnosis_result, matches, product_df,
                  ai_summary=None, ai_risks=None, ai_suggestions=None,
                  ai_recommendation=None, rag_citations=None, rag_asof=None,
                  ml_proba=None, ml_conclusion=None, shap_contribs=None,
-                 gap_result=None):
+                 gap_result=None, policy_result=None):
     """
     生成诊断报告 PDF（返回 BytesIO）。
 
@@ -146,8 +146,8 @@ def generate_pdf(metrics, diagnosis_result, matches, product_df,
     elements.append(ov_tbl)
     elements.append(Spacer(1, 3 * mm))
 
-    # ===== 二、金融健康评分与双轨诊断 =====
-    elements.append(Paragraph("金融健康评分与双轨诊断", h1_style))
+    # ===== 二、金融健康评分 =====
+    elements.append(Paragraph("金融健康评分", h1_style))
     overall = diagnosis_result.get("overall_score", 0)
     lvl_txt, lvl_color = _score_level(overall)
     elements.append(Paragraph(
@@ -155,22 +155,22 @@ def generate_pdf(metrics, diagnosis_result, matches, product_df,
         f"<font color='{_level_hex(lvl_txt)}'><b>{lvl_txt}</b></font>", body_style))
     elements.append(Spacer(1, 2 * mm))
 
-    # --- ML 双轨对照节（用户勾选） ---
-    elements.append(Paragraph("双轨诊断对照（规则引擎 × 违约 ML）", body_style))
+    # --- 诊断结论与风险概率 ---
+    elements.append(Paragraph("诊断结论与风险概率", body_style))
     if ml_proba is not None:
         elements.append(Paragraph(
-            f"· ML 模型预测违约概率：<b>{ml_proba * 100:.1f}%</b>", body_style))
+            f"· 违约风险概率：<b>{ml_proba * 100:.1f}%</b>", body_style))
         if ml_conclusion:
-            elements.append(Paragraph(f"· 双轨组合结论：{_line_break(ml_conclusion)}",
+            elements.append(Paragraph(f"· 综合结论：{_line_break(ml_conclusion)}",
                                      body_style))
         else:
             elements.append(Paragraph(
-                "· 双轨结论：ML 模型可用，但双轨组合结论未生成（可配置 API Key 后重试）。",
+                "· 综合结论：风险模型可用，但结论未生成（可配置 API Key 后重试）。",
                 body_style))
     else:
         elements.append(Paragraph(
-            "· 当前为<b>单轨规则卡结论</b>：ML 违约模型不可用（模型文件缺失或未配置），"
-            "未提供违约概率与双轨对照。", warn_style))
+            "· 当前为<b>综合评分结论</b>：风险模型不可用（模型文件缺失或未配置），"
+            "未提供违约概率。", warn_style))
     elements.append(Spacer(1, 3 * mm))
 
     # --- 8 维健康评分表 ---
@@ -198,7 +198,7 @@ def generate_pdf(metrics, diagnosis_result, matches, product_df,
 
     # --- AI 诊断总结 ---
     if ai_summary:
-        elements.append(Paragraph("AI 诊断总结", body_style))
+        elements.append(Paragraph("智能诊断总结", body_style))
         elements.append(Paragraph(_line_break(ai_summary), body_style))
         elements.append(Spacer(1, 2 * mm))
 
@@ -250,7 +250,7 @@ def generate_pdf(metrics, diagnosis_result, matches, product_df,
                                   body_style))
     if ai_recommendation:
         elements.append(Spacer(1, 2 * mm))
-        elements.append(Paragraph("AI 产品推荐说明", body_style))
+        elements.append(Paragraph("智能产品推荐说明", body_style))
         elements.append(Paragraph(_line_break(ai_recommendation), body_style))
     if product_df is not None and not product_df.empty:
         try:
@@ -333,6 +333,23 @@ def generate_pdf(metrics, diagnosis_result, matches, product_df,
                     diagnosis_result.get("suggestions", []),
                     bullet_style, body_style, "暂无明显需改善项。")
 
+    # ===== 行业政策环境（政策信号模型，融入整体分析） =====
+    if policy_result:
+        elements.append(Paragraph("行业政策环境", h1_style))
+        elements.append(Paragraph(
+            f"所属行业：{_esc(policy_result.get('industry', '通用'))}　"
+            f"政策景气指数：<b>{policy_result.get('index')} / 100</b>"
+            f"（{_esc(policy_result.get('level', ''))}）　趋势：{_esc(policy_result.get('trend', ''))}",
+            body_style))
+        elements.append(Paragraph(
+            f"对经营稳定性的影响：{_esc(policy_result.get('effect', ''))}", body_style))
+        recent = policy_result.get("recent") or []
+        if recent:
+            elements.append(Paragraph("近期政策摘编：", body_style))
+            for ev in recent:
+                elements.append(Paragraph(f"· {_esc(ev)}", note_style))
+        elements.append(Spacer(1, 3 * mm))
+
     # ===== 附录：政策与产品依据 =====
     if rag_citations:
         elements.append(Paragraph("附录：政策与产品依据", h1_style))
@@ -346,7 +363,7 @@ def generate_pdf(metrics, diagnosis_result, matches, product_df,
     # ===== 免责声明（结尾段落，非页脚/页码） =====
     elements.append(HRFlowable(width="100%", thickness=0.8, color=C_BORDER))
     elements.append(Paragraph(
-        "<i>免责声明：本报告由 AI 工具生成，仅供企业融资决策参考，不构成任何金融建议。"
+        "<i>免责声明：本报告由智能诊断工具生成，仅供企业融资决策参考，不构成任何金融建议。"
         "具体融资方案请咨询正规金融机构。</i>", note_style))
 
     doc.build(elements)
