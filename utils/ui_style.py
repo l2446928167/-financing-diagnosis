@@ -96,7 +96,7 @@ html, body, [class*="st-"]{
 
 def inject_css():
     """在 set_page_config 之后调用一次，注入全局样式。"""
-    st.markdown(_CSS, unsafe_allow_html=True)
+    st.markdown(f"<style>{_CSS}</style>", unsafe_allow_html=True)
 
 
 def badge(text, level="blue"):
