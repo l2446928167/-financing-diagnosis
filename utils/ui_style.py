@@ -1,35 +1,96 @@
 """
-utils/ui_style.py — 全局视觉系统（v2.0 新增，纯展示层，不涉及任何算法逻辑）
+utils/ui_style.py — 全局视觉系统（v3.0 对话式重做，纯展示层）
 
-设计令牌：
-  主色   #1F4E79（金融深青蓝：标题/按钮/强调）
-  语义色 绿 #16A34A / 黄 #D97706 / 红 #DC2626（仅用于红黄绿灯与双轨结论徽章）
-  中性   页面底 #F7F8FA / 卡片 #FFFFFF / 边框 #E5E7EB / 正文 #374151 / 次要 #6B7280
-配合 .streamlit/config.toml 使用；卡片容器用 st.container(border=True)。
+设计令牌（现代 fintech / AI 助手风）：
+  主色    #2F54EB（geekblue：信任 + 科技感）
+  强调弱  #EEF1FE
+  背景    #F5F6F8（柔和中性灰）
+  表面    #FFFFFF（卡片 / 助手气泡）
+  文字    #1F2733（主） / #5B6573（次）
+  边框    #E6E8EC
+  语义    成功 #2BA471 / 警示 #D98B1F / 危险 #E5484D
+字体：Inter（拉丁）+ Noto Sans SC（中文），字号字重统一。
+配合 .streamlit/config.toml 使用；卡片用 st.container(border=True) / 对话气泡由 CSS 接管。
 """
 import streamlit as st
 
 _CSS = """
-<style>
-.block-container {padding-top: 2rem; max-width: 1180px;}
-h1, h2, h3 {color: #1F4E79;}
-[data-testid="stMetricValue"] {color: #1F4E79;}
-.fd-badge {display:inline-block; padding:2px 10px; border-radius:999px;
-           font-size:12px; font-weight:500; line-height:1.6;}
-.fd-green {background:#E8F6EE; color:#16A34A;}
-.fd-amber {background:#FBF3E3; color:#D97706;}
-.fd-red   {background:#FBEAEA; color:#DC2626;}
-.fd-blue  {background:#E8F0F8; color:#1F4E79;}
-.fd-hero  {text-align:center; padding:36px 0 20px;}
-.fd-hero .t {font-size:26px; font-weight:500; color:#1F4E79; margin-bottom:8px;}
-.fd-hero .s {color:#6B7280; font-size:14px; margin-bottom:18px;}
-.fd-hero .steps {display:flex; justify-content:center; gap:32px;
-                 color:#6B7280; font-size:13px;}
-.fd-hero .steps b {color:#1F4E79; font-weight:500;}
-.fd-empty {text-align:center; padding:48px 0; color:#6B7280;}
-.fd-empty .t {font-size:15px; color:#374151; margin-bottom:6px;}
-.fd-cite {font-size:12px; color:#6B7280;}
-</style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap');
+
+:root{
+  --fd-bg:#F5F6F8; --fd-surface:#FFFFFF; --fd-primary:#2F54EB;
+  --fd-primary-weak:#EEF1FE; --fd-text:#1F2733; --fd-text-2:#5B6573;
+  --fd-border:#E6E8EC; --fd-success:#2BA471; --fd-warning:#D98B1F; --fd-danger:#E5484D;
+}
+
+html, body, [class*="st-"]{
+  font-family:'Inter','Noto Sans SC',-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif !important;
+}
+* { -webkit-font-smoothing:antialiased; }
+
+.block-container{ max-width:880px; padding-top:1.1rem; padding-bottom:3.2rem; }
+.main .block-container{ background:var(--fd-bg); }
+
+/* 顶部品牌条 */
+.fd-topbar{ display:flex; align-items:center; gap:10px; margin-bottom:6px; }
+.fd-topbar .dot{ width:30px; height:30px; border-radius:9px;
+  background:linear-gradient(135deg,var(--fd-primary),#5B7CF0);
+  display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:15px; }
+.fd-topbar .name{ font-size:17px; font-weight:600; color:var(--fd-text); letter-spacing:.3px; }
+.fd-topbar .sub{ font-size:12px; color:var(--fd-text-2); margin-top:1px; }
+.fd-divider{ height:1px; background:var(--fd-border); margin:8px 0 14px; }
+
+/* 语义徽章 */
+.fd-badge{ display:inline-block; padding:2px 11px; border-radius:999px;
+  font-size:12px; font-weight:600; line-height:1.7; white-space:nowrap; }
+.fd-green{ background:#E7F6EF; color:var(--fd-success); }
+.fd-amber{ background:#FBF1E0; color:var(--fd-warning); }
+.fd-red{ background:#FCEAEA; color:var(--fd-danger); }
+.fd-blue{ background:var(--fd-primary-weak); color:var(--fd-primary); }
+
+/* 对话气泡 */
+[data-testid="chatAvatarIcon"]{ display:none !important; }
+.stChatMessage{ padding:0.3rem 0; align-items:flex-end; }
+[data-testid="stChatMessageContent"]{
+  border-radius:16px; padding:10px 14px; line-height:1.62; font-size:15px;
+  box-shadow:0 1px 2px rgba(20,30,60,.04); max-width:100%;
+}
+.stChatMessage--assistant [data-testid="stChatMessageContent"]{
+  background:var(--fd-surface); color:var(--fd-text); border:1px solid var(--fd-border); }
+.stChatMessage--user [data-testid="stChatMessageContent"]{
+  background:var(--fd-primary); color:#fff; border:none; }
+.stChatMessage--user [data-testid="stChatMessageContent"] *{ color:#fff; }
+.stChatMessage--user [data-testid="stChatMessageContent"] a{ color:#DCE4FF; }
+
+/* 输入框（对话式收件栏） */
+[data-testid="stChatInput"]{
+  background:var(--fd-surface); border:1px solid var(--fd-border);
+  border-radius:18px; padding:6px 12px; box-shadow:0 4px 18px rgba(20,30,60,.07); }
+[data-testid="stChatInput"] textarea{
+  border-radius:12px !important; font-size:15px !important; }
+[data-testid="stChatInput"] textarea::placeholder{ color:var(--fd-text-2); }
+
+/* 按钮 / 表单 / 指标 */
+.stButton>button{ border-radius:10px; font-weight:500; }
+.stButton>button[kind="primary"]{ background:var(--fd-primary) !important;
+  border-color:var(--fd-primary) !important; }
+.stTextInput>div>div>input, .stNumberInput>div>div>input, .stSelectbox>div>div,
+.stTextArea>div>div>textarea{
+  border-radius:10px !important; border-color:var(--fd-border) !important; }
+[data-testid="stMetricValue"]{ color:var(--fd-primary); font-weight:600; }
+[data-testid="stExpander"]{ border-radius:12px !important; border-color:var(--fd-border) !important; }
+.stDataFrame{ border-radius:12px; }
+
+/* 侧边栏 */
+[data-testid="stSidebar"]{ background:var(--fd-surface); border-right:1px solid var(--fd-border); }
+[data-testid="stSidebar"] .fd-brand{ display:flex; align-items:center; gap:9px; margin-bottom:4px; }
+[data-testid="stSidebar"] .fd-brand .dot{ width:26px; height:26px; border-radius:8px;
+  background:linear-gradient(135deg,var(--fd-primary),#5B7CF0); color:#fff; font-weight:700;
+  display:flex; align-items:center; justify-content:center; font-size:13px; }
+[data-testid="stSidebar"] .fd-brand .t{ font-size:15px; font-weight:600; color:var(--fd-text); }
+
+/* 隐藏默认页脚，保持整洁 */
+[data-testid="stFooter"]{ display:none !important; }
 """
 
 
@@ -59,27 +120,3 @@ def dim_level(score):
     if score >= 4:
         return "amber"
     return "red"
-
-
-def hero():
-    """Tab1 空状态：价值主张 + 三步引导。"""
-    st.markdown(
-        '<div class="fd-hero">'
-        '<div class="t">上传一份财务数据，三步拿到融资诊断</div>'
-        '<div class="s">规则引擎 × 违约 ML 双轨对照 · 8 维健康评分 · '
-        '信贷产品匹配与差距分析 · 政策可溯源问答</div>'
-        '<div class="steps"><span><b>1</b>　上传或手动录入数据</span>'
-        '<span><b>2</b>　确认指标并开始诊断</span>'
-        '<span><b>3</b>　查看报告与产品匹配</span></div>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-
-def empty_state(title, hint):
-    """Tab2/3 空状态：引导回数据录入页。"""
-    st.markdown(
-        f'<div class="fd-empty"><div class="t">{title}</div>'
-        f'<div>{hint}</div></div>',
-        unsafe_allow_html=True,
-    )

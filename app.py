@@ -1,15 +1,13 @@
 """
-app.py v2.0 — 界面重构版
+app.py v3.0 — 对话式融资诊断助手
 
-相对 v1.6 的改动（算法模块 modules/ 与 utils/vector_store.py 均未改动）：
-- 信息架构：单页长滚动 → 四标签页（数据录入 / 诊断报告 / 产品匹配与差距 / 政策问答）
-- P0 修复：诊断结果、匹配、报告全部从 session_state 渲染，rerun 不再丢失
-  （v1.6 全部渲染在 `if st.button()` 块内，任意交互即清空）
-- P0 修复：录入控件包进 st.form，一次提交一次 rerun；问答区 st.fragment 独立刷新
-- 指标修正墙 → st.data_editor 表格；补充信息分「基础 + 高级选项」
-- 新增纯手动录入路径（无文件也可演示）；空状态 hero 引导
-- 视觉：config.toml 金融蓝主题 + utils/ui_style.py 卡片/徽章；8 维与 SHAP 升级为配色图表
-- 侧边栏精简：不再回显 Key 片段；移除单选项模型下拉
+相对 v2.0（四 Tab）的改动（算法模块 modules/ 与 utils/vector_store.py 均未改动）：
+- 移除标签栏，改为 st.chat_message + st.chat_input 的对话流
+- session_state.messages 保存对话历史；状态机 stage 驱动：init → need_confirm → diagnosed
+  政策/产品问答随时可用（默认把自由文本当作溯源问答）
+- 指标确认表单 / 文件上传为「当前步」的 live 面板，不污染对话历史
+- 所有结果（诊断 / 匹配 / 问答 / 报告）以助手消息返回，可在同一对话中自然衔接下一项任务
+- 配色 / 字体 / 气泡由 utils/ui_style.py v3.0 接管
 """
 import re
 import os
@@ -17,65 +15,64 @@ import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "v2.0 (2026-08-13)"
+APP_VERSION = "v3.0 (2026-08-14)"
 MODEL_NAME = "DeepSeek-V4-Flash"
 PRODUCT_CSV = "knowledge/bank_products/products.csv"
 RAG_INDEX = "knowledge/rag_corpus/bm25_index.json"
 
 load_dotenv()
 
-st.set_page_config(page_title="小微企业融资诊断", page_icon="🏦", layout="wide")
+st.set_page_config(page_title="融资诊断助手", page_icon="💬",
+                   layout="centered", initial_sidebar_state="expanded")
 
-from utils.ui_style import inject_css, badge, score_level, dim_level, hero, empty_state  # noqa: E402
+from utils.ui_style import inject_css, badge, score_level, dim_level  # noqa: E402
 
 inject_css()
 
 # ======================== session_state 初始化 ========================
-for _k, _v in {
+_DEFAULTS = {
     "metrics": {}, "metrics_rev": 0, "raw_text": "", "df": None,
     "diagnosis_result": None, "full_metrics": None, "llm_text": None,
     "ai_extracted": False, "match_cache": None, "pdf_bytes": None,
     "ai_rec": None, "qa_result": None, "_ai_changes": [], "_file_sig": None,
-}.items():
+    "messages": [], "stage": "init", "ml": None, "gap_cache": None,
+}
+for _k, _v in _DEFAULTS.items():
     st.session_state.setdefault(_k, _v)
 
-# ======================== 侧边栏 ========================
+# ======================== 侧边栏（极简控制面板） ========================
 with st.sidebar:
-    st.header("配置")
+    st.markdown(
+        '<div class="fd-brand"><div class="dot">融</div><div class="t">融资诊断助手</div></div>',
+        unsafe_allow_html=True)
+    st.caption("规则引擎 × 违约 ML 双轨 · 政策产品可溯源")
+
     api_key = st.text_input("DeepSeek API Key", type="password",
-                            value=os.environ.get("DEEPSEEK_API_KEY", ""))
+                            value=os.environ.get("DEEPSEEK_API_KEY", ""),
+                            help="留空也可使用规则引擎与检索问答")
     st.session_state.api_key = api_key
     st.session_state.model = MODEL_NAME
-
     if api_key:
-        st.caption("✅ 已配置 API Key，AI 功能可用")
+        st.success("已配置 API Key，AI 功能可用", icon="✅")
     else:
-        st.caption("⚠️ 未配置 API Key：AI 提取/生成不可用，规则引擎与检索问答仍可用")
+        st.info("未配置 Key：AI 提取/生成不可用，规则引擎与检索问答仍可用")
 
-    s1, s2 = st.columns(2)
-    with s1:
-        if st.button("保存到本地", use_container_width=True):
-            if api_key:
-                set_key(os.path.join(os.path.dirname(__file__), ".env"),
-                        "DEEPSEEK_API_KEY", api_key)
-                st.toast("API Key 已保存，下次启动自动加载")
-            else:
-                st.toast("请先输入 API Key")
-    with s2:
-        if st.button("测试连接", use_container_width=True):
-            from utils.llm_helper import test_api_connection
-            with st.spinner("测试连接中…"):
-                ok, msg = test_api_connection(api_key)
-            (st.success if ok else st.error)(msg)
+    with st.expander("设置"):
+        st.caption(f"模型：{MODEL_NAME}")
+        st.caption("在左侧上传财务文件，或在对话中手动录入指标。")
 
-    st.caption(f"模型：{MODEL_NAME} ｜ 版本：{APP_VERSION}")
-    with st.expander("使用说明"):
-        st.markdown(
-            "1. 「数据录入」上传文件或手动录入，确认指标后开始诊断\n"
-            "2. 「诊断报告」查看评分、双轨对照与 SHAP 归因，下载 PDF\n"
-            "3. 「产品匹配与差距」查看信贷产品匹配与行动方案\n"
-            "4. 「政策问答」可溯源查询政策与产品"
-        )
+    st.file_uploader("上传财务文件（PDF / Excel / CSV）",
+                    type=["pdf", "xlsx", "xls", "csv"],
+                    key="attach", on_change=None,
+                    help="上传后将在对话中引导你确认指标并开始诊断")
+
+    if st.button("清空对话", use_container_width=True, key="clear_all"):
+        _reset_all_pending = True
+    else:
+        _reset_all_pending = False
+
+    st.divider()
+    st.caption(f"版本：{APP_VERSION}")
 
 # ======================== 辅助函数 ========================
 
@@ -104,12 +101,8 @@ def generate_diagnosis_text(full_metrics, dims, overall, model_choice, api_key):
     <内容>
     【风险点】
     - 风险1
-    - 风险2
-    ...
     【改善建议】
     - 建议1
-    - 建议2
-    ...
     """
     user_prompt = f"""
     企业指标：
@@ -198,7 +191,7 @@ def _report_rag_citations():
 
 
 def _gen_ai_recommendation(full_metrics, matches):
-    """AI 产品推荐 / 无匹配时的改善建议（按钮触发，避免每次 rerun 调 LLM）。"""
+    """AI 产品推荐 / 无匹配时的改善建议。"""
     from utils.llm_helper import call_llm
     if matches:
         product_list = "\n".join([
@@ -265,7 +258,7 @@ def _dims_chart(dims):
                 color=alt.Color(
                     "等级:N",
                     scale=alt.Scale(domain=["健康", "关注", "高风险"],
-                                    range=["#16A34A", "#D97706", "#DC2626"]),
+                                    range=["#2BA471", "#D98B1F", "#E5484D"]),
                     legend=None),
                 tooltip=["维度", "评分"],
             )
@@ -295,7 +288,7 @@ def _shap_chart(contribs):
                 color=alt.Color(
                     "方向:N",
                     scale=alt.Scale(domain=["推高违约", "拉低违约"],
-                                    range=["#DC2626", "#16A34A"]),
+                                    range=["#E5484D", "#2BA471"]),
                     legend=alt.Legend(title=None, orient="bottom")),
                 tooltip=["因子", "贡献"],
             )
@@ -306,9 +299,8 @@ def _shap_chart(contribs):
         st.bar_chart(df.set_index("因子"))
 
 
-# ======================== Tab1：数据录入 ========================
+# ======================== 文件解析 / 录入 ========================
 
-# diagnose() 消费的原始财务键（与 modules/diagnosis.py 一致），手动录入模板用
 _MANUAL_KEYS = ["总资产", "总负债", "营业收入", "营业成本", "净利润",
                 "流动负债", "经营活动现金流净额", "利息费用",
                 "应收账款", "存货", "流动比率"]
@@ -327,6 +319,8 @@ def _handle_file(uploaded_file):
         st.session_state.match_cache = None
         st.session_state.pdf_bytes = None
         st.session_state.ai_rec = None
+        st.session_state.ml = None
+        st.session_state.gap_cache = None
         st.session_state._ai_changes = []
         with st.spinner("正在解析文件…"):
             try:
@@ -340,18 +334,9 @@ def _handle_file(uploaded_file):
         st.session_state.metrics_rev += 1
         st.toast("文件解析完成，请确认下方指标")
 
-    raw_text, df = st.session_state.raw_text, st.session_state.df
-    type_info = {"pdf": "PDF", "xlsx": "Excel", "xls": "Excel", "csv": "CSV"}
-    parts = [type_info.get(uploaded_file.name.split(".")[-1].lower(), "文件")]
-    if raw_text and raw_text.strip():
-        parts.append(f"文本 {len(raw_text)} 字符")
-    if df is not None:
-        parts.append(f"表格 {df.shape[0]} 行 × {df.shape[1]} 列")
-    st.caption("已解析：" + " ｜ ".join(parts))
-
 
 def _render_ai_extract():
-    """AI 智能提取（表单外，需要即时触发），差异清单持久展示。"""
+    """AI 智能提取（需要即时触发），差异清单持久展示。"""
     if not st.session_state.get("api_key"):
         st.caption("在侧边栏配置 API Key 后，可用 AI 智能提取财务指标（比正则更准）。")
         return
@@ -381,7 +366,7 @@ def _render_ai_extract():
                 changes.append(f"{k}: {ov or '(空)'} → {nv}")
         st.session_state.metrics = ai_metrics
         st.session_state.ai_extracted = True
-        st.session_state.metrics_rev += 1   # 触发 data_editor 重建，展示新值
+        st.session_state.metrics_rev += 1
         st.session_state._ai_changes = changes
         st.toast(f"AI 提取完成，更新 {len(changes)} 个指标")
         st.rerun()
@@ -395,7 +380,7 @@ def _render_verification():
     verification = st.session_state.metrics.get("__verification__")
     if not verification:
         return
-    with st.expander("会计校验结果", expanded=True):
+    with st.expander("会计校验结果", expanded=False):
         for check in verification:
             status = check.get("是否通过")
             name = check.get("检查项", "")
@@ -409,17 +394,6 @@ def _render_verification():
                 st.markdown(f"ℹ️ **{name}**：无法校验（{actual}）")
 
 
-def _render_raw_data():
-    with st.expander("查看原始解析数据"):
-        if st.session_state.df is not None:
-            st.dataframe(st.session_state.df, use_container_width=True)
-        if st.session_state.raw_text:
-            st.text_area("提取的文本（前 10000 字符）",
-                         st.session_state.raw_text[:10000], height=260)
-            st.download_button("下载完整原始文本", data=st.session_state.raw_text,
-                               file_name="raw_text.txt", mime="text/plain")
-
-
 def _seed_manual_template():
     st.session_state.metrics = {
         k: {"value": "", "unit": ("倍" if k == "流动比率" else "万元"), "page": ""}
@@ -428,12 +402,457 @@ def _seed_manual_template():
     st.session_state.metrics_rev += 1
 
 
-def _render_diagnosis_form():
-    """指标确认（data_editor）+ 补充信息 + 提交诊断。st.form 内一次提交一次 rerun。"""
+def _run_diagnosis(edited, s):
+    """计算并写入 session_state（与 v2 一致）。"""
+    from modules.diagnosis import diagnose
+
+    metrics = {}
+    for _, row in edited.iterrows():
+        metrics[row["指标"]] = {"value": str(row["数值"]),
+                                "unit": str(row["单位"]), "page": str(row["来源页"])}
+    for k in st.session_state.metrics:
+        if k.startswith("__"):
+            metrics[k] = st.session_state.metrics[k]
+    st.session_state.metrics = metrics
+
+    flat = {k: (v.get("value", "") if isinstance(v, dict) else str(v))
+            for k, v in metrics.items() if not k.startswith("__")}
+    full_metrics = {
+        **flat,
+        "经营年限": s["operating_years"],
+        "客户集中度": s["customer_concentration"],
+        "平均融资利率": s["avg_interest_rate"],
+        "行业": s["industry"],
+        "应收账款_3月内占比": s["ar_less_3m"],
+        "应收账款_3_12月占比": s["ar_3_12m"],
+        "应收账款_超12月占比": s["ar_over_12m"],
+        "纳税信用评级": "" if s["tax_credit_rating"] == "未评级" else s["tax_credit_rating"],
+        "实控人征信状态": s["controller_credit"],
+        "法院执行记录": s["court_execution"],
+        "融资机构数量": s["financing_institution_count"],
+        "营收增长率": s["revenue_growth_rate"],
+        "净利润增长率": s["profit_growth_rate"],
+        "可提供抵押": s["can_collateral"] == "可提供",
+        "行业周期信号": s["industry_cycle"],
+    }
+    with st.spinner("规则引擎诊断中…"):
+        result = diagnose(full_metrics)
+
+    st.session_state.full_metrics = full_metrics
+    st.session_state.diagnosis_result = result
+    st.session_state.match_cache = None
+    st.session_state.pdf_bytes = None
+    st.session_state.ai_rec = None
+    st.session_state.gap_cache = None
+
+    if st.session_state.get("api_key"):
+        with st.spinner("AI 正在生成诊断总结…"):
+            st.session_state.llm_text = generate_diagnosis_text(
+                full_metrics, result["dimension_scores"], result["overall_score"],
+                st.session_state.model, st.session_state.api_key)
+    else:
+        st.session_state.llm_text = None
+
+
+def _after_diagnose():
+    """诊断完成后的收尾：补算 ML 双轨 / SHAP，写快照消息。"""
+    res = st.session_state.diagnosis_result
+    full = st.session_state.full_metrics
+    dims = res["dimension_scores"]
+    score = res["overall_score"]
+    level, label = score_level(score)
+
+    proba = conclusion = None
+    contribs = None
+    try:
+        from modules.ml_model import (predict_default_proba,
+                                      dual_track_conclusion, explain_statement)
+        _CAT = {"纳税信用评级", "实控人征信状态", "法院执行记录",
+                "客户集中度", "行业", "可提供抵押"}
+        statement = {k: (v if k in _CAT else _to_num(v))
+                     for k, v in full.items()}
+        proba = predict_default_proba(statement)
+        conclusion, _tag = dual_track_conclusion(score, proba)
+        try:
+            contribs = explain_statement(statement)
+        except Exception:
+            contribs = None
+    except Exception:
+        pass
+    st.session_state.ml = {"proba": proba, "conclusion": conclusion,
+                           "contribs": contribs}
+
+    summary, risks, suggestions = _parse_llm_sections(st.session_state.get("llm_text"))
+    snap = {"overall": score, "level": level, "label": label, "proba": proba,
+            "conclusion": conclusion, "dims": dims, "contribs": contribs,
+            "summary": summary, "risks": risks, "suggestions": suggestions}
+    st.session_state.stage = "diagnosed"
+    add_assistant("已完成金融健康诊断，结果如下：",
+                  payload={"type": "diagnosis", "data": snap})
+    add_assistant("接下来可以：查看「信贷产品匹配」、问我政策问题，或「生成 PDF 报告」。")
+
+
+# ======================== 对话消息工具 ========================
+
+
+def add_msg(role, content=None, payload=None):
+    st.session_state.messages.append(
+        {"role": role, "content": content, "payload": payload})
+
+
+def add_user(content):
+    add_msg("user", content)
+
+
+def add_assistant(content=None, payload=None):
+    add_msg("assistant", content, payload)
+
+
+def _reset_data():
+    st.session_state.metrics = {}
+    st.session_state.raw_text = ""
+    st.session_state.df = None
+    st.session_state.diagnosis_result = None
+    st.session_state.full_metrics = None
+    st.session_state.llm_text = None
+    st.session_state.ai_extracted = False
+    st.session_state.match_cache = None
+    st.session_state.pdf_bytes = None
+    st.session_state.ai_rec = None
+    st.session_state.qa_result = None
+    st.session_state.ml = None
+    st.session_state.gap_cache = None
+    st.session_state._file_sig = None
+    st.session_state._ai_changes = []
+    st.session_state.stage = "init"
+
+
+def _reset_all():
+    _reset_data()
+    st.session_state.messages = []
+    st.session_state.stage = "init"
+
+
+def _render_message(m):
+    with st.chat_message(m["role"]):
+        if m.get("content"):
+            st.markdown(m["content"], unsafe_allow_html=True)
+        p = m.get("payload")
+        if p:
+            _render_payload(p)
+
+
+def _render_payload(p):
+    t = p.get("type")
+    if t == "diagnosis":
+        _render_diagnosis_payload(p["data"])
+    elif t == "products":
+        _render_products_payload(p["data"])
+    elif t == "qa":
+        _render_qa_payload(p["data"])
+    elif t == "report":
+        _render_report_payload()
+
+
+# ---------------- 诊断结果（助手消息内渲染） ----------------
+def _render_diagnosis_payload(d):
+    res_score = d["overall"]
+    level, label = d["level"], d["label"]
+    o1, o2, o3 = st.columns([1, 1, 2])
+    with o1:
+        st.metric("总体健康评分", f"{res_score} / 10")
+        st.markdown(badge(label, level), unsafe_allow_html=True)
+    with o2:
+        st.metric("ML 违约概率", "不可用" if d["proba"] is None else f"{d['proba'] * 100:.1f}%")
+    with o3:
+        st.markdown("**双轨结论（规则卡 × ML）**")
+        st.info(d["conclusion"] if d["conclusion"]
+                else "ML 模型不可用，当前为单轨规则卡结论。")
+
+    st.markdown("**8 维健康评分**")
+    _dims_chart(d["dims"])
+    badge_cols = st.columns(4)
+    for i, (dim, sc) in enumerate(d["dims"].items()):
+        with badge_cols[i % 4]:
+            st.markdown(f"{dim}　{badge(f'{sc}/10', dim_level(sc))}",
+                        unsafe_allow_html=True)
+
+    if d["contribs"]:
+        with st.expander("SHAP 归因（各因子对违约概率的贡献方向与强度）"):
+            _shap_chart(d["contribs"])
+            st.caption("正值推高违约概率、负值拉低。模型为合成数据方法论演示，仅供对照参考。")
+
+    summary, risks, suggestions = d["summary"], d["risks"], d["suggestions"]
+    if summary:
+        st.markdown("**AI 诊断总结**")
+        st.markdown(summary)
+    r1, r2 = st.columns(2)
+    with r1:
+        st.markdown("**核心风险点**")
+        shown = risks or st.session_state.diagnosis_result.get("risks", [])
+        if shown:
+            for r_ in shown:
+                st.markdown(f"- {r_}")
+        else:
+            st.success("未发现明显风险点。")
+    with r2:
+        st.markdown("**改善行动建议**")
+        shown = suggestions or st.session_state.diagnosis_result.get("suggestions", [])
+        for s_ in shown:
+            st.markdown(f"- {s_}")
+    st.caption("以上诊断基于规则引擎与 AI 生成内容，仅供参考，不构成金融建议。")
+
+
+# ---------------- 产品匹配（助手消息内渲染） ----------------
+def _gap_action_rows(gap):
+    if not gap:
+        return []
+    action_plan = gap.get("action_plan", [])
+    rows = []
+    for act in action_plan:
+        mode = act.get("impact_mode", "unlock")
+        if mode == "unlock":
+            impact_label = str(act["impact"])
+            products_label = ("、".join(act["impact_products"][:5])
+                              if act["impact_products"] else "—")
+        else:
+            impact_label = f"{act['impact']}（尚有其他差距）"
+            products_label = (("、".join(act["impact_products"][:5]) + "…")
+                              if act["impact_products"] else "—")
+        rows.append({
+            "优先级": act["priority"], "行动": act["action"],
+            "当前值": act["current"], "目标值": act["target"],
+            "难度": act["difficulty"], "影响产品数": impact_label,
+            "相关产品": products_label, "预计时间": act["estimated_time"],
+            "性价比": act["cost_efficiency"],
+        })
+    return rows
+
+
+def _render_products_payload(data):
+    matches = data.get("matches") or []
+    if matches:
+        display_cols = ["匹配度", "产品名", "银行", "产品类型",
+                        "额度", "利率", "准入条件", "差距说明"]
+        st.dataframe(pd.DataFrame(matches)[display_cols],
+                     use_container_width=True, hide_index=True)
+    else:
+        st.warning("未找到匹配的信贷产品，建议改善财务状况后再查询。")
+
+    if data.get("gap_summary"):
+        st.markdown(f"**差距分析总结**　{data['gap_summary']}")
+
+    action_rows = data.get("action_rows") or []
+    if action_rows:
+        with st.expander("差距分析与行动方案（按性价比排序）"):
+            st.caption("性价比 = 解锁产品数 ÷ 提升难度分，数值越高越应优先。")
+            st.dataframe(pd.DataFrame(action_rows), use_container_width=True, hide_index=True)
+
+    if st.session_state.get("api_key") and not st.session_state.get("ai_rec"):
+        if st.button("生成 AI 产品推荐说明", key="ai_rec_btn2"):
+            with st.spinner("AI 正在分析最佳产品方案…"):
+                st.session_state.ai_rec = _gen_ai_recommendation(
+                    st.session_state.full_metrics, matches)
+            st.rerun()
+    if st.session_state.get("ai_rec"):
+        st.markdown("**AI 产品推荐说明**")
+        st.markdown(st.session_state.ai_rec)
+
+
+# ---------------- 问答（助手消息内渲染） ----------------
+def _render_qa_payload(data):
+    if data.get("empty"):
+        st.info("该问题未被本模块语料收录（诚实返回空，不编造）。"
+                "可改问信贷产品或普惠政策。")
+        return
+    if data.get("mock"):
+        st.caption("未配置 API Key：当前展示检索片段（配置后由 DeepSeek 做溯源生成）")
+    st.markdown(data.get("text", ""))
+    cites = data.get("citations") or []
+    if cites:
+        with st.expander(f"参考清单（{len(cites)} 条；政策条目为条款摘编）"):
+            for c in cites:
+                st.markdown(f"- {c}")
+    if data.get("asof"):
+        st.caption(f"检索截至 {data['asof']}")
+
+
+# ---------------- 报告（助手消息内渲染） ----------------
+def _render_report_payload():
+    if st.session_state.get("pdf_bytes"):
+        st.download_button("下载 PDF 报告", data=st.session_state.pdf_bytes,
+                           file_name="融资诊断报告.pdf",
+                           mime="application/pdf", type="primary")
+    else:
+        st.info("报告尚未生成，请稍候或重试。")
+
+
+# ======================== 行为分发 ========================
+
+
+def do_diagnose():
+    if not st.session_state.metrics:
+        add_assistant("还没有可诊断的数据，请在左侧上传财务文件，或点击下方「手动录入指标」。")
+        return
+    if st.session_state.diagnosis_result and st.session_state.stage == "diagnosed":
+        _after_diagnose()  # 用现有指标重算并刷新消息
+        return
+    add_assistant("请在下方指标表单确认后，点击「开始金融健康诊断」。")
+
+
+def do_products():
+    try:
+        matches = _ensure_matches()
+    except Exception as e:
+        add_assistant(f"产品匹配出错：{e}")
+        return
+    try:
+        from modules.gap_analysis import analyze_gaps
+        gap = analyze_gaps(st.session_state.full_metrics,
+                           st.session_state.diagnosis_result["dimension_scores"],
+                           _load_products())
+        st.session_state.gap_cache = gap
+    except Exception:
+        gap = None
+    snap = {"matches": matches,
+            "gap_summary": gap.get("summary") if gap else None,
+            "action_rows": _gap_action_rows(gap) if gap else []}
+    add_assistant("已为你匹配信贷产品并量化差距：",
+                  payload={"type": "products", "data": snap})
+
+
+def do_report():
+    full = st.session_state.full_metrics
+    res = st.session_state.diagnosis_result
+    matches = _ensure_matches()
+    rag_cites, rag_asof = _report_rag_citations()
+    ml = st.session_state.ml or {}
+    gap = st.session_state.gap_cache
+    if gap is None:
+        try:
+            from modules.gap_analysis import analyze_gaps
+            gap = analyze_gaps(full, res["dimension_scores"], _load_products())
+        except Exception:
+            gap = None
+    if st.session_state.get("api_key") and not st.session_state.get("ai_rec"):
+        with st.spinner("生成 AI 产品推荐…"):
+            st.session_state.ai_rec = _gen_ai_recommendation(full, matches)
+    summary, risks, suggestions = _parse_llm_sections(st.session_state.get("llm_text"))
+    try:
+        from modules.report_generator import generate_pdf
+        with st.spinner("正在生成 PDF 报告…"):
+            st.session_state.pdf_bytes = generate_pdf(
+                full, res, matches, _load_products(),
+                ai_summary=summary,
+                ai_risks="\n".join(f"- {r}" for r in risks),
+                ai_suggestions="\n".join(f"- {x}" for x in suggestions),
+                ai_recommendation=st.session_state.get("ai_rec") or "",
+                rag_citations=rag_cites, rag_asof=rag_asof,
+                ml_proba=ml.get("proba"), ml_conclusion=ml.get("conclusion"),
+                shap_contribs=ml.get("contribs"), gap_result=gap)
+        add_assistant("诊断报告已生成，点击下方按钮下载：",
+                      payload={"type": "report"})
+    except Exception as e:
+        add_assistant(f"报告生成失败：{e}")
+
+
+def do_qa(question):
+    try:
+        from utils.vector_store import retrieve, grounded_answer
+        from utils.llm_helper import call_llm as rag_call_llm
+        rag_index, rag_meta = _load_rag_index()
+    except Exception as e:
+        add_assistant(f"问答模块不可用：{e}")
+        return
+    q = question.strip()
+    hits = retrieve(rag_index, q, k=5)
+    if not hits:
+        add_assistant("", payload={"type": "qa",
+                     "data": {"empty": True, "text": "", "citations": [],
+                              "mock": False, "asof": ""}})
+        return
+    use_mock = not st.session_state.get("api_key")
+
+    def _rag_llm(prompt, temperature=0):
+        return rag_call_llm(
+            "你是小微金融政策与银行产品问答助手，仅基于给定资料回答。",
+            prompt, st.session_state.model, st.session_state.api_key,
+            temperature=temperature, max_tokens=600)
+
+    with st.spinner("检索中…" if use_mock else "检索与生成中…"):
+        ans = grounded_answer(None if use_mock else _rag_llm, q, hits,
+                              use_mock=use_mock)
+    add_assistant("", payload={"type": "qa",
+                 "data": {"empty": False, "text": ans.text,
+                          "citations": ans.citations, "mock": use_mock,
+                          "asof": rag_meta.get("asof", "")}})
+
+
+def _enter_manual():
+    if st.session_state.stage in ("need_confirm", "diagnosed") and st.session_state.metrics:
+        add_assistant("当前已有数据。如需重新手动录入，请先点「重新录入」。")
+        return
+    _seed_manual_template()
+    st.session_state.stage = "need_confirm"
+    add_user("我想手动录入财务指标")
+    add_assistant("已为你生成指标模板，请在下方填写（单位：万元 / 倍），确认后开始诊断。")
+
+
+def _dispatch(cmd):
+    if cmd == "manual":
+        _enter_manual()
+    elif cmd == "qa_intro":
+        add_assistant("请在下方输入框直接提问，我会基于政策与产品库为你溯源回答"
+                      "（未收录的问题会如实告知）。")
+    elif cmd == "diagnose":
+        do_diagnose()
+    elif cmd == "products":
+        if not st.session_state.diagnosis_result:
+            add_assistant("请先完成诊断，我再为你匹配信贷产品。")
+        else:
+            do_products()
+    elif cmd == "report":
+        if not st.session_state.diagnosis_result:
+            add_assistant("请先完成诊断，我再为你生成 PDF 报告。")
+        else:
+            do_report()
+    elif cmd == "reset":
+        _reset_data()
+        add_assistant("已清空数据，可重新上传文件或手动录入。")
+
+
+def _classify(text):
+    t = text.strip()
+    if any(k in t for k in ("诊断", "分析", "评分", "健康", "开始")):
+        return "diagnose"
+    if any(k in t for k in ("产品", "匹配", "信贷", "推荐", "贷款")):
+        return "products"
+    if any(k in t for k in ("报告", "pdf", "PDF", "下载报告")):
+        return "report"
+    return "qa"
+
+
+# ======================== 文件上传（侧边栏回调） ========================
+def _on_upload():
+    f = st.session_state.get("attach")
+    if f is None:
+        if st.session_state._file_sig is not None:
+            _reset_data()
+        return
+    _handle_file(f)
+    st.session_state.stage = "need_confirm"
+    add_user(f"我上传了文件：{f.name}")
+    add_assistant("已解析你的财务资料，请在下方的指标表中确认或补充，然后开始诊断。")
+
+
+# ======================== live 面板：指标确认 ========================
+def _render_confirm_panel():
     m = st.session_state.metrics
+    if not m:
+        return
     src = "AI 提取" if st.session_state.ai_extracted else "自动提取 / 手动录入"
-    st.subheader("确认指标与补充信息")
-    st.caption(f"指标来源：{src}；「数值」列可直接编辑。")
+    st.markdown(f"**确认指标与补充信息**　<span class='fd-badge fd-blue'>{src}</span>",
+                unsafe_allow_html=True)
 
     with st.form("diagnosis_form"):
         rows = []
@@ -495,12 +914,10 @@ def _render_diagnosis_form():
             g4, g5 = st.columns(2)
             with g4:
                 can_collateral = st.selectbox(
-                    "是否可提供抵押/担保", ["可提供", "暂无法提供"],
-                    help="影响需要抵押物的产品匹配与差距分析")
+                    "是否可提供抵押/担保", ["可提供", "暂无法提供"])
             with g5:
                 industry_cycle = st.slider(
-                    "行业周期信号（ML 外部输入）", -1.0, 1.0, 0.0, 0.1,
-                    help="-1=行业深度下行，0=平稳，1=高度景气；正式版接行业景气度数据源")
+                    "行业周期信号（ML 外部输入）", -1.0, 1.0, 0.0, 0.1)
 
         submitted = st.form_submit_button("开始金融健康诊断", type="primary",
                                           use_container_width=True)
@@ -523,368 +940,90 @@ def _render_diagnosis_form():
             "can_collateral": can_collateral,
             "industry_cycle": industry_cycle,
         })
+        _after_diagnose()
+        st.rerun()
 
 
-def _run_diagnosis(edited, s):
-    """计算并写入 session_state；渲染全部在按钮块外（修 v1.6 结果消失 bug）。"""
-    from modules.diagnosis import diagnose
+# ======================== 快捷操作 ========================
+def _quick_actions():
+    stage = st.session_state.stage
+    if stage == "init":
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("手动录入指标", use_container_width=True, key="qa_manual"):
+                st.session_state._pending = "manual"
+        with c2:
+            if st.button("我想了解政策", use_container_width=True, key="qa_policy"):
+                st.session_state._pending = "qa_intro"
+    elif stage == "need_confirm":
+        st.caption("↑ 在上方表单确认指标后，点击「开始金融健康诊断」")
+    elif stage == "diagnosed":
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            if st.button("查看产品匹配", use_container_width=True, key="qa_prod"):
+                st.session_state._pending = "products"
+        with c2:
+            if st.button("问政策问题", use_container_width=True, key="qa_ask"):
+                st.session_state._pending = "qa_intro"
+        with c3:
+            if st.button("生成 PDF 报告", use_container_width=True, key="qa_rep"):
+                st.session_state._pending = "report"
+        with c4:
+            if st.button("重新录入", use_container_width=True, key="qa_reset"):
+                st.session_state._pending = "reset"
 
-    metrics = {}
-    for _, row in edited.iterrows():
-        metrics[row["指标"]] = {"value": str(row["数值"]),
-                                "unit": str(row["单位"]), "page": str(row["来源页"])}
-    for k in st.session_state.metrics:          # 保留 __verification__ 等特殊键
-        if k.startswith("__"):
-            metrics[k] = st.session_state.metrics[k]
-    st.session_state.metrics = metrics
 
-    flat = {k: (v.get("value", "") if isinstance(v, dict) else str(v))
-            for k, v in metrics.items() if not k.startswith("__")}
-    full_metrics = {
-        **flat,
-        "经营年限": s["operating_years"],
-        "客户集中度": s["customer_concentration"],
-        "平均融资利率": s["avg_interest_rate"],
-        "行业": s["industry"],
-        "应收账款_3月内占比": s["ar_less_3m"],
-        "应收账款_3_12月占比": s["ar_3_12m"],
-        "应收账款_超12月占比": s["ar_over_12m"],
-        "纳税信用评级": "" if s["tax_credit_rating"] == "未评级" else s["tax_credit_rating"],
-        "实控人征信状态": s["controller_credit"],
-        "法院执行记录": s["court_execution"],
-        "融资机构数量": s["financing_institution_count"],
-        "营收增长率": s["revenue_growth_rate"],
-        "净利润增长率": s["profit_growth_rate"],
-        "可提供抵押": s["can_collateral"] == "可提供",
-        "行业周期信号": s["industry_cycle"],
-    }
-    with st.spinner("规则引擎诊断中…"):
-        result = diagnose(full_metrics)
+# ======================== 主区渲染 ========================
+st.markdown(
+    '<div class="fd-topbar"><div class="dot">融</div>'
+    '<div><div class="name">融资诊断助手</div>'
+    '<div class="sub">上传财报或手动录入，即可获得 8 维诊断 · 产品匹配 · 政策问答 · 报告</div></div></div>',
+    unsafe_allow_html=True)
+st.markdown('<div class="fd-divider"></div>', unsafe_allow_html=True)
 
-    st.session_state.full_metrics = full_metrics
-    st.session_state.diagnosis_result = result
-    st.session_state.match_cache = None
-    st.session_state.pdf_bytes = None
-    st.session_state.ai_rec = None
+# 首次进入的欢迎语（messages 为空时仅加一次）
+if not st.session_state.messages:
+    add_assistant("你好，我是你的融资诊断助手 🤝")
+    add_assistant(
+        "把一份财务资料（PDF / Excel / CSV）上传到**左侧**，或点击下方「手动录入指标」"
+        "开始。我会帮你完成：\n\n"
+        "① **8 维金融健康诊断**（规则引擎 × 违约 ML 双轨）\n"
+        "② **信贷产品匹配**与量化差距分析\n"
+        "③ **政策 / 产品溯源问答**\n"
+        "④ **一键生成诊断报告（PDF）**\n\n"
+        "所有任务都在对话里完成，无需切换页面。")
 
-    if st.session_state.get("api_key"):
-        with st.spinner("AI 正在生成诊断总结…"):
-            st.session_state.llm_text = generate_diagnosis_text(
-                full_metrics, result["dimension_scores"], result["overall_score"],
-                st.session_state.model, st.session_state.api_key)
+# 处理快捷操作回调（必须在渲染消息前）
+if _reset_all_pending:
+    _reset_all()
+if st.session_state.get("_pending"):
+    cmd = st.session_state._pending
+    st.session_state._pending = None
+    _dispatch(cmd)
+
+# 侧边栏上传回调
+_on_upload()
+
+# 渲染对话历史
+for _m in st.session_state.messages:
+    _render_message(_m)
+
+# 当前步 live 面板
+if st.session_state.stage == "need_confirm":
+    _render_confirm_panel()
+    with st.expander("解析详情 / AI 提取", expanded=False):
+        _render_ai_extract()
+        _render_verification()
+
+# 快捷操作
+_quick_actions()
+
+# 对话输入
+prompt = st.chat_input("描述需求，或提出政策 / 产品问题…")
+if prompt:
+    add_user(prompt)
+    cmd = _classify(prompt)
+    if cmd == "qa":
+        do_qa(prompt)
     else:
-        st.session_state.llm_text = None
-    st.toast("诊断完成，切换到「诊断报告」标签页查看")
-
-
-# ======================== 页面结构 ========================
-
-st.title("AI + 小微企业融资诊断")
-st.caption("规则引擎 × 违约 ML 双轨对照 · 政策/产品可溯源问答 · 一键生成诊断报告")
-
-tab_input, tab_diag, tab_match, tab_qa = st.tabs(
-    ["数据录入", "诊断报告", "产品匹配与差距", "政策问答"])
-
-# ---------------- Tab 1 ----------------
-with tab_input:
-    uploaded_file = st.file_uploader(
-        "上传财务报表 / 银行流水 / 应收账款明细（PDF / Excel / CSV）",
-        type=["pdf", "xlsx", "xls", "csv"])
-
-    if uploaded_file is not None:
-        _handle_file(uploaded_file)
-        if st.session_state.raw_text or st.session_state.df is not None:
-            _render_ai_extract()
-            _render_verification()
-            _render_raw_data()
-    elif st.session_state._file_sig is not None:
-        # 文件被移除 → 清空派生状态
-        st.session_state._file_sig = None
-        st.session_state.metrics = {}
-        st.session_state.raw_text = ""
-        st.session_state.df = None
-        st.session_state.diagnosis_result = None
-        st.session_state.full_metrics = None
-        st.session_state.llm_text = None
-        st.session_state.ai_extracted = False
-        st.session_state.match_cache = None
-        st.session_state.pdf_bytes = None
-        st.session_state.ai_rec = None
-
-    if st.session_state.metrics:
-        _render_diagnosis_form()
-    else:
-        if uploaded_file is not None:
-            st.warning("未能从该文件提取到可读内容，可更换文件，或手动录入指标。")
-        else:
-            hero()
-        if st.checkbox("手动录入指标", key="manual_mode"):
-            _seed_manual_template()
-            st.rerun()
-
-# ---------------- Tab 2：诊断报告 ----------------
-with tab_diag:
-    res = st.session_state.diagnosis_result
-    if not res:
-        empty_state("尚无诊断结果",
-                    "请先在「数据录入」页确认指标，点击「开始金融健康诊断」。")
-    else:
-        full_metrics = st.session_state.full_metrics
-        dims = res["dimension_scores"]
-        score = res["overall_score"]
-        level, label = score_level(score)
-
-        # 双轨（ML 概率 + 四态结论），模型缺失自动降级
-        statement, proba, conclusion = None, None, None
-        try:
-            from modules.ml_model import (predict_default_proba,
-                                          dual_track_conclusion, explain_statement)
-            _CAT = {"纳税信用评级", "实控人征信状态", "法院执行记录",
-                    "客户集中度", "行业", "可提供抵押"}
-            statement = {k: (v if k in _CAT else _to_num(v))
-                         for k, v in full_metrics.items()}
-            proba = predict_default_proba(statement)
-            conclusion, _tag = dual_track_conclusion(score, proba)
-        except Exception:
-            statement = None
-
-        o1, o2, o3 = st.columns([1, 1, 2])
-        with o1:
-            st.metric("总体健康评分", f"{score} / 10")
-            st.markdown(badge(label, level), unsafe_allow_html=True)
-        with o2:
-            st.metric("ML 违约概率", "不可用" if proba is None else f"{proba * 100:.1f}%")
-        with o3:
-            st.markdown("**双轨结论（规则卡 × ML）**")
-            st.info(conclusion if conclusion else "ML 模型不可用，当前为单轨规则卡结论。")
-
-        st.subheader("8 维健康评分")
-        _dims_chart(dims)
-        badge_cols = st.columns(4)
-        for i, (dim, sc) in enumerate(dims.items()):
-            with badge_cols[i % 4]:
-                st.markdown(f"{dim}　{badge(f'{sc}/10', dim_level(sc))}",
-                            unsafe_allow_html=True)
-
-        if statement is not None:
-            try:
-                contribs = explain_statement(statement)
-            except Exception:
-                contribs = None
-            if contribs:
-                with st.expander("SHAP 归因（各因子对违约概率的贡献方向与强度）"):
-                    _shap_chart(contribs)
-                    st.caption("正值推高违约概率、负值拉低。模型为合成数据方法论演示，仅供对照参考。")
-
-        summary, risks, suggestions = _parse_llm_sections(st.session_state.get("llm_text"))
-        if summary:
-            st.subheader("AI 诊断总结")
-            st.markdown(summary)
-
-        r1, r2 = st.columns(2)
-        with r1:
-            st.subheader("核心风险点")
-            shown = risks or res["risks"]
-            if shown:
-                for r in shown:
-                    st.markdown(f"- {r}")
-            else:
-                st.success("未发现明显风险点。")
-        with r2:
-            st.subheader("改善行动建议")
-            shown = suggestions or res["suggestions"]
-            for s_ in shown:
-                st.markdown(f"- {s_}")
-        st.caption("以上诊断基于规则引擎与 AI 生成内容，仅供参考，不构成金融建议。")
-
-        st.subheader("下载诊断报告")
-        with st.container(border=True):
-            st.caption("报告包含：指标与评分、双轨结论、风险与建议、产品匹配，"
-                       "以及政策与产品依据附录（条款摘编）。")
-            if st.button("生成 PDF 报告", key="gen_pdf", type="primary"):
-                with st.spinner("正在生成 PDF…"):
-                    try:
-                        from modules.report_generator import generate_pdf
-                        matches = _ensure_matches()
-                        rag_cites, rag_asof = _report_rag_citations()
-                        st.session_state.pdf_bytes = generate_pdf(
-                            full_metrics, res, matches, _load_products(),
-                            ai_summary=summary,
-                            ai_risks="\n".join(f"- {r}" for r in risks),
-                            ai_suggestions="\n".join(f"- {x}" for x in suggestions),
-                            ai_recommendation=st.session_state.get("ai_rec") or "",
-                            rag_citations=rag_cites,
-                            rag_asof=rag_asof)
-                        st.toast("PDF 报告已生成")
-                    except Exception as e:
-                        st.error(f"报告生成失败：{e}")
-            if st.session_state.get("pdf_bytes"):
-                st.download_button("下载 PDF 报告", data=st.session_state.pdf_bytes,
-                                   file_name="融资诊断报告.pdf", mime="application/pdf",
-                                   key="dl_pdf")
-
-# ---------------- Tab 3：产品匹配与差距 ----------------
-with tab_match:
-    if not st.session_state.diagnosis_result:
-        empty_state("尚无诊断结果", "完成诊断后，这里会给出信贷产品匹配与差距分析。")
-    else:
-        full_metrics = st.session_state.full_metrics
-        res = st.session_state.diagnosis_result
-
-        st.subheader("匹配银行信贷产品")
-        try:
-            matches = _ensure_matches()
-        except Exception as e:
-            st.error(f"产品匹配出错：{e}")
-            matches = []
-
-        if matches:
-            display_cols = ["匹配度", "产品名", "银行", "产品类型",
-                            "额度", "利率", "准入条件", "差距说明"]
-            st.dataframe(pd.DataFrame(matches)[display_cols],
-                         use_container_width=True, hide_index=True)
-            st.caption("数据来源及采集日期见产品库明细。")
-        else:
-            st.warning("未找到匹配的信贷产品，建议改善财务状况后再查询。")
-
-        if st.session_state.get("api_key"):
-            if st.button("生成 AI 产品推荐说明", key="ai_rec_btn"):
-                with st.spinner("AI 正在分析最佳产品方案…"):
-                    st.session_state.ai_rec = _gen_ai_recommendation(full_metrics, matches)
-            if st.session_state.get("ai_rec"):
-                with st.container(border=True):
-                    st.markdown("**AI 产品推荐说明**")
-                    st.markdown(st.session_state.ai_rec)
-        else:
-            st.caption("配置 API Key 后可生成 AI 产品推荐说明。")
-
-        st.subheader("差距分析与行动方案")
-        try:
-            from modules.gap_analysis import analyze_gaps
-            gap_result = analyze_gaps(full_metrics, res["dimension_scores"], _load_products())
-
-            action_plan = gap_result.get("action_plan", [])
-            if action_plan:
-                st.markdown("性价比 = 解锁产品数 ÷ 提升难度分，数值越高越应优先。")
-                action_rows = []
-                for act in action_plan:
-                    mode = act.get("impact_mode", "unlock")
-                    if mode == "unlock":
-                        impact_label = str(act["impact"])
-                        products_label = ("、".join(act["impact_products"][:5])
-                                          if act["impact_products"] else "—")
-                    else:
-                        impact_label = f"{act['impact']}（尚有其他差距）"
-                        products_label = (("、".join(act["impact_products"][:5]) + "…")
-                                          if act["impact_products"] else "—")
-                    action_rows.append({
-                        "优先级": act["priority"], "行动": act["action"],
-                        "当前值": act["current"], "目标值": act["target"],
-                        "难度": act["difficulty"], "影响产品数": impact_label,
-                        "相关产品": products_label, "预计时间": act["estimated_time"],
-                        "性价比": act["cost_efficiency"],
-                    })
-                st.dataframe(pd.DataFrame(action_rows),
-                             use_container_width=True, hide_index=True)
-            else:
-                st.success("所有匹配产品均无差距，无需额外行动。")
-
-            gap_products = [p for p in gap_result.get("product_gap_details", [])
-                            if p["match_status"] == "差距匹配"]
-            if gap_products:
-                st.markdown("**各产品差距明细**")
-                for gp in gap_products:
-                    with st.expander(f"{gp['product']}（{gp['bank']}）— {gp['product_type']}"):
-                        if gp["gaps"]:
-                            gap_table = [{
-                                "差距项": g["item"], "当前值": g["current"],
-                                "准入要求": g["required"],
-                                "差距量": (f"{g['gap_size']:.1f}"
-                                          if isinstance(g["gap_size"], (int, float))
-                                          else g["gap_size"]),
-                                "提升难度": g["difficulty"],
-                            } for g in gp["gaps"]]
-                            st.dataframe(pd.DataFrame(gap_table), hide_index=True,
-                                         use_container_width=True)
-                            st.caption(f"最容易补齐：{gp['closest_to_qualify']}")
-                        else:
-                            st.info("该产品已达标")
-
-            if gap_result.get("summary"):
-                st.markdown("**总结**")
-                st.markdown(gap_result["summary"])
-        except Exception as e:
-            st.error(f"差距分析出错：{e}")
-
-        _products = _load_products()
-        with st.expander(f"查看完整产品库（{len(_products)} 条）"):
-            st.dataframe(_products, use_container_width=True, hide_index=True)
-            st.caption("数据来源：各银行官网，采集日期见表中字段。")
-
-# ---------------- Tab 4：政策问答 ----------------
-
-
-def _qa_body():
-    """RAG 问答：BM25 检索 + 溯源生成；无 Key 降级检索片段；OOV 诚实空。"""
-    try:
-        from utils.vector_store import retrieve, grounded_answer
-        from utils.llm_helper import call_llm as rag_call_llm
-        rag_index, rag_meta = _load_rag_index()
-    except Exception as e:
-        st.warning(f"RAG 模块不可用：{e}")
-        return
-
-    q = st.text_input("问题", key="qa_q",
-                      placeholder="例：科技型小微企业无抵押能贷多少？")
-    cat = st.radio("语料范围", ["全部", "政策", "产品", "研报"],
-                   horizontal=True, key="qa_cat")
-    cat_map = {"全部": None, "政策": "policy", "产品": "product", "研报": "research"}
-
-    if st.button("检索回答", key="qa_go", type="primary") and q.strip():
-        hits = retrieve(rag_index, q.strip(), k=5, category=cat_map[cat])
-        if not hits:
-            st.session_state.qa_result = {"q": q.strip(), "empty": True}
-        else:
-            use_mock = not st.session_state.get("api_key")
-
-            def _rag_llm(prompt, temperature=0):
-                return rag_call_llm(
-                    "你是小微金融政策与银行产品问答助手，仅基于给定资料回答。",
-                    prompt, st.session_state.model, st.session_state.api_key,
-                    temperature=temperature, max_tokens=600)
-
-            with st.spinner("检索中…" if use_mock else "检索与生成中…"):
-                ans = grounded_answer(None if use_mock else _rag_llm,
-                                      q.strip(), hits, use_mock=use_mock)
-            st.session_state.qa_result = {
-                "q": q.strip(), "empty": False, "mock": use_mock,
-                "text": ans.text, "citations": ans.citations,
-            }
-
-    result = st.session_state.get("qa_result")
-    if not result:
-        return
-    if result["empty"]:
-        st.info("该问题未被本模块语料收录（诚实返回空，不编造）。"
-                "可改问信贷产品或普惠政策。")
-        return
-    if result["mock"]:
-        st.caption("未配置 API Key：当前展示检索片段（配置后由 DeepSeek 做溯源生成）")
-    with st.container(border=True):
-        st.markdown(result["text"])
-    with st.expander(f"参考清单（{len(result['citations'])} 条；政策条目为条款摘编）"):
-        for c in result["citations"]:
-            st.markdown(f"- {c}")
-    if rag_meta.get("asof"):
-        st.caption(f"检索截至 {rag_meta['asof']} ｜ 产品库指纹 "
-                   f"{str(rag_meta.get('products_csv_sha256', ''))[:12]}…")
-
-
-with tab_qa:
-    st.subheader("政策 / 产品智能问答（可溯源）")
-    st.caption("基于 BM25 检索 + 溯源生成：只用语料回答，未知即如实返回空。")
-    _fragment = getattr(st, "fragment", None)
-    try:
-        (_fragment(_qa_body) if _fragment else _qa_body)()
-    except Exception as e:
-        st.warning(f"问答区渲染异常：{e}")
+        _dispatch(cmd)
