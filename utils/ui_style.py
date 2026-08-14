@@ -9,13 +9,13 @@ utils/ui_style.py — 全局视觉系统（v3.0 对话式重做，纯展示层�
   文字    #1F2733（主） / #5B6573（次）
   边框    #E6E8EC
   语义    成功 #2BA471 / 警示 #D98B1F / 危险 #E5484D
-字体：Inter（拉丁）+ Noto Sans SC（中文），字号字重统一。
+字体：系统字体栈（覆盖 HarmonyOS / Windows / macOS / Linux 中文），不依赖外部字体，避免国内 / 离线环境中文渲染异常（乱码 / 豆腐块）。
 配合 .streamlit/config.toml 使用；卡片用 st.container(border=True) / 对话气泡由 CSS 接管。
 """
 import streamlit as st
 
 _CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap');
+/* 不依赖外部字体（Google Fonts 在国内 / 离线环境常加载失败，会导致中文回退异常）；统一使用系统字体栈 */
 
 :root{
   --fd-bg:#F5F6F8; --fd-surface:#FFFFFF; --fd-primary:#2F54EB;
@@ -24,7 +24,7 @@ _CSS = """
 }
 
 html, body, [class*="st-"]{
-  font-family:'Inter','Noto Sans SC',-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif !important;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Microsoft YaHei UI', 'Noto Sans CJK SC', 'Source Han Sans SC', 'Source Han Sans CN', 'WenQuanYi Micro Hei', 'HarmonyOS Sans SC', sans-serif !important;
 }
 * { -webkit-font-smoothing:antialiased; }
 
