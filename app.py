@@ -17,8 +17,9 @@ import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
 
-from config import DEEPSEEK_API_KEY, MODEL_NAME   # API Key 仅来自环境变量 / .env
+from config import DEEPSEEK_API_KEY, MODEL_NAME   # 兼容旧引用；密钥统一走网关
 from utils import persistence as PS
+from utils.llm_gateway import gateway               # 服务端统一 LLM 网关（密钥/限流/记账）
 from utils.ui_style import inject_css, badge, score_level, dim_level
 
 load_dotenv()
@@ -117,7 +118,7 @@ def _to_num(v):
 
 def generate_diagnosis_text(full_metrics, dims, overall, model_choice, api_key):
     """用 LLM 生成诊断总结、风险点、改善建议，失败返回 None。"""
-    from utils.llm_helper import call_llm
+    # 实际调用统一走服务端网关 gateway().chat()，密钥/限流/记账均在服务端
 
     system_prompt = """
     你是一位资深的小微企业融资顾问。根据提供的企业财务指标和8维度健康评分，
@@ -155,7 +156,7 @@ def generate_diagnosis_text(full_metrics, dims, overall, model_choice, api_key):
         user_prompt += f"\n- {dim}：{score}"
     user_prompt += f"\n总体健康评分：{overall}/10"
 
-    return call_llm(system_prompt, user_prompt, model_choice, api_key)
+    return gateway().chat(system_prompt, user_prompt, model_choice=model_choice, user_id="diag")
 
 
 def _parse_llm_sections(llm_text):
@@ -219,7 +220,7 @@ def _report_rag_citations():
 
 def _gen_ai_recommendation(full_metrics, matches):
     """智能产品推荐 / 无匹配时的改善建议。"""
-    from utils.llm_helper import call_llm
+    # 实际调用走服务端网关 gateway().chat()
     if matches:
         product_list = "\n".join([
             f"- {m['匹配度']} {m['产品名']}（{m['银行']}），额度：{m['额度']}万元，"
@@ -249,8 +250,8 @@ def _gen_ai_recommendation(full_metrics, matches):
         请直接输出推荐内容，不要使用markdown标题。
         """
         system = "你是资深小微企业信贷顾问，语言简洁专业，用'建议'而非'你应该'。"
-        return call_llm(system, prompt, st.session_state.model,
-                        st.session_state.api_key, max_tokens=500)
+        return gateway().chat(system, prompt, model_choice=st.session_state.model,
+                              user_id="rec", max_tokens=500)
     prompt = f"""
     企业当前未匹配到任何信贷产品，请根据企业情况给出2-3条具体改善建议，
     帮助其未来达到银行准入条件。企业情况：
@@ -262,8 +263,8 @@ def _gen_ai_recommendation(full_metrics, matches):
     征信状态：{full_metrics.get('实控人征信状态', '未填写')}
     """
     system = "你是小微企业融资改善顾问，给出可操作的建议。"
-    return call_llm(system, prompt, st.session_state.model,
-                    st.session_state.api_key, max_tokens=400)
+    return gateway().chat(system, prompt, model_choice=st.session_state.model,
+                          user_id="rec", max_tokens=400)
 
 
 # ======================== 图表 ========================
@@ -357,6 +358,12 @@ def _handle_file(uploaded_file):
         st.toast("文件解析完成，请确认下方指标")
 
 
+def _gw_call_llm(system_prompt, user_prompt, model_choice, api_key, temperature=0.3, max_tokens=800):
+    """适配 llm_extract_metrics 的回调签名，统一路由到服务端网关（密钥不离开服务端）。"""
+    return gateway().chat(system_prompt, user_prompt, model_choice=model_choice,
+                          user_id="extract", temperature=temperature, max_tokens=max_tokens)
+
+
 def _render_ai_extract():
     if not st.session_state.get("api_key"):
         st.caption("未配置 API Key（环境变量 DEEPSEEK_API_KEY），暂不可用智能提取；"
@@ -366,10 +373,9 @@ def _render_ai_extract():
         with st.spinner("正在分析文件内容…"):
             try:
                 from modules.data_input import llm_extract_metrics
-                from utils.llm_helper import call_llm
                 ai_metrics = llm_extract_metrics(
                     st.session_state.raw_text, st.session_state.df,
-                    st.session_state.model, st.session_state.api_key, call_llm)
+                    st.session_state.model, st.session_state.api_key, _gw_call_llm)
             except Exception as e:
                 st.error(f"智能提取异常：{type(e).__name__} – {e}")
                 return
@@ -862,15 +868,14 @@ def _file_qa(question):
         local_hits = []
 
     if st.session_state.get("api_key"):
-        from utils.llm_helper import call_llm
         prompt = (
             "根据以下企业财务资料回答问题，仅基于资料作答；"
             "资料中没有的信息请明确说明无法回答。\n\n"
             f"资料：\n{ctx}\n\n问题：{question.strip()}"
         )
-        ans = call_llm("你是财务分析助手，仅基于给定的企业资料作答，语言简洁。",
-                       prompt, st.session_state.model, st.session_state.api_key,
-                       max_tokens=500)
+        ans = gateway().chat("你是财务分析助手，仅基于给定的企业资料作答，语言简洁。",
+                             prompt, model_choice=st.session_state.model,
+                             user_id="fileqa", max_tokens=500)
         return ans if ans else None
 
     if local_hits:
@@ -888,7 +893,6 @@ def do_qa(question):
 
     try:
         from utils.vector_store import retrieve, grounded_answer
-        from utils.llm_helper import call_llm as rag_call_llm
         rag_index, rag_meta = _load_rag_index()
     except Exception as e:
         add_assistant(f"问答模块不可用：{e}")
@@ -903,10 +907,10 @@ def do_qa(question):
     use_mock = not st.session_state.get("api_key")
 
     def _rag_llm(prompt, temperature=0):
-        return rag_call_llm(
+        return gateway().chat(
             "你是小微金融政策与银行产品问答助手，仅基于给定资料回答。",
-            prompt, st.session_state.model, st.session_state.api_key,
-            temperature=temperature, max_tokens=600)
+            prompt, model_choice=st.session_state.model,
+            user_id="rag", temperature=temperature, max_tokens=600)
 
     with st.spinner("检索中…" if use_mock else "检索与生成中…"):
         ans = grounded_answer(None if use_mock else _rag_llm, q, hits,
