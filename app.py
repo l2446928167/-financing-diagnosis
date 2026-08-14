@@ -385,7 +385,7 @@ def _render_ai_extract():
             ov = of.get("value", "") if isinstance(of, dict) else str(of)
             nv = nf.get("value", "") if isinstance(nf, dict) else str(nf)
             if nv and ov != nv:
-                changes.append(f"{k}: {ov or '(空)'} → {nv}")
+                changes.append(f"{k}: {ov or '(空)'}  更新为  {nv}")
         st.session_state.metrics = ai_metrics
         st.session_state.ai_extracted = True
         st.session_state.metrics_rev += 1
