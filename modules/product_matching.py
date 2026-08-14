@@ -116,13 +116,13 @@ def match_products(metrics, df_products):
 
         # 判断匹配度
         if veto:
-            match_degree = "🟡 差距匹配"
+            match_degree = "差距匹配"
             gap_desc = "；".join(gaps)
         elif not gaps:
-            match_degree = "🟢 完全匹配"
+            match_degree = "完全匹配"
             gap_desc = "无"
         elif len(gaps) <= 2:
-            match_degree = "🟡 差距匹配"
+            match_degree = "差距匹配"
             gap_desc = "；".join(gaps)
         else:
             continue  # 不匹配，跳过不展示
