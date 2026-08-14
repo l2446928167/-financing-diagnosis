@@ -13,16 +13,17 @@ app.py v4.0 — 对话式融资诊断助手
 """
 import re
 import os
+from dotenv import load_dotenv
+
+load_dotenv()  # 先于 config 导入，确保 .env 变量已载入
+
 import streamlit as st
 import pandas as pd
-from dotenv import load_dotenv
 
 from config import DEEPSEEK_API_KEY, MODEL_NAME   # 兼容旧引用；密钥统一走网关
 from utils import persistence as PS
 from utils.llm_gateway import gateway               # 服务端统一 LLM 网关（密钥/限流/记账）
 from utils.ui_style import inject_css, badge, score_level, dim_level
-
-load_dotenv()
 
 st.set_page_config(page_title="融资诊断助手", layout="centered")
 
