@@ -6,4 +6,6 @@ reportlab
 openai
 python-dotenv
 httpx
-xgboost
+# 说明：ML 评分模型（modules/rf_model.py）为纯 Python 实现，无需 numpy / sklearn / xgboost。
+# 可视化（utils/svg_charts.py）亦为纯 Python 生成 SVG，无需 matplotlib / cairosvg。
+# 依赖装不上第三方 ML/绘图轮子时可正常运行全部模型与图表功能。
