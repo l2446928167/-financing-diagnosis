@@ -15,14 +15,13 @@ import re
 import os
 from dotenv import load_dotenv
 
-load_dotenv()  # 先于 config 导入，确保 .env 变量已载入
+load_dotenv()  # 先于 config 导入，确保 .env 变量已被载入环境
 
 import streamlit as st
 import pandas as pd
 
-from config import DEEPSEEK_API_KEY, MODEL_NAME   # 兼容旧引用；密钥统一走网关
+from config import DEEPSEEK_API_KEY, MODEL_NAME   # API Key 仅来自环境变量 / .env
 from utils import persistence as PS
-from utils.llm_gateway import gateway               # 服务端统一 LLM 网关（密钥/限流/记账）
 from utils.ui_style import inject_css, badge, score_level, dim_level
 
 st.set_page_config(page_title="融资诊断助手", layout="centered")
@@ -119,7 +118,7 @@ def _to_num(v):
 
 def generate_diagnosis_text(full_metrics, dims, overall, model_choice, api_key):
     """用 LLM 生成诊断总结、风险点、改善建议，失败返回 None。"""
-    # 实际调用统一走服务端网关 gateway().chat()，密钥/限流/记账均在服务端
+    from utils.llm_helper import call_llm
 
     system_prompt = """
     你是一位资深的小微企业融资顾问。根据提供的企业财务指标和8维度健康评分，
@@ -157,7 +156,7 @@ def generate_diagnosis_text(full_metrics, dims, overall, model_choice, api_key):
         user_prompt += f"\n- {dim}：{score}"
     user_prompt += f"\n总体健康评分：{overall}/10"
 
-    return gateway().chat(system_prompt, user_prompt, model_choice=model_choice, user_id="diag")
+    return call_llm(system_prompt, user_prompt, model_choice, api_key)
 
 
 def _parse_llm_sections(llm_text):
@@ -221,7 +220,7 @@ def _report_rag_citations():
 
 def _gen_ai_recommendation(full_metrics, matches):
     """智能产品推荐 / 无匹配时的改善建议。"""
-    # 实际调用走服务端网关 gateway().chat()
+    from utils.llm_helper import call_llm
     if matches:
         product_list = "\n".join([
             f"- {m['匹配度']} {m['产品名']}（{m['银行']}），额度：{m['额度']}万元，"
@@ -251,8 +250,8 @@ def _gen_ai_recommendation(full_metrics, matches):
         请直接输出推荐内容，不要使用markdown标题。
         """
         system = "你是资深小微企业信贷顾问，语言简洁专业，用'建议'而非'你应该'。"
-        return gateway().chat(system, prompt, model_choice=st.session_state.model,
-                              user_id="rec", max_tokens=500)
+        return call_llm(system, prompt, st.session_state.model,
+                        st.session_state.api_key, max_tokens=500)
     prompt = f"""
     企业当前未匹配到任何信贷产品，请根据企业情况给出2-3条具体改善建议，
     帮助其未来达到银行准入条件。企业情况：
@@ -264,8 +263,8 @@ def _gen_ai_recommendation(full_metrics, matches):
     征信状态：{full_metrics.get('实控人征信状态', '未填写')}
     """
     system = "你是小微企业融资改善顾问，给出可操作的建议。"
-    return gateway().chat(system, prompt, model_choice=st.session_state.model,
-                          user_id="rec", max_tokens=400)
+    return call_llm(system, prompt, st.session_state.model,
+                    st.session_state.api_key, max_tokens=400)
 
 
 # ======================== 图表 ========================
@@ -359,12 +358,6 @@ def _handle_file(uploaded_file):
         st.toast("文件解析完成，请确认下方指标")
 
 
-def _gw_call_llm(system_prompt, user_prompt, model_choice, api_key, temperature=0.3, max_tokens=800):
-    """适配 llm_extract_metrics 的回调签名，统一路由到服务端网关（密钥不离开服务端）。"""
-    return gateway().chat(system_prompt, user_prompt, model_choice=model_choice,
-                          user_id="extract", temperature=temperature, max_tokens=max_tokens)
-
-
 def _render_ai_extract():
     if not st.session_state.get("api_key"):
         st.caption("未配置 API Key（环境变量 DEEPSEEK_API_KEY），暂不可用智能提取；"
@@ -374,9 +367,10 @@ def _render_ai_extract():
         with st.spinner("正在分析文件内容…"):
             try:
                 from modules.data_input import llm_extract_metrics
+                from utils.llm_helper import call_llm
                 ai_metrics = llm_extract_metrics(
                     st.session_state.raw_text, st.session_state.df,
-                    st.session_state.model, st.session_state.api_key, _gw_call_llm)
+                    st.session_state.model, st.session_state.api_key, call_llm)
             except Exception as e:
                 st.error(f"智能提取异常：{type(e).__name__} – {e}")
                 return
@@ -392,7 +386,7 @@ def _render_ai_extract():
             ov = of.get("value", "") if isinstance(of, dict) else str(of)
             nv = nf.get("value", "") if isinstance(nf, dict) else str(nf)
             if nv and ov != nv:
-                changes.append(f"{k}: {ov or '(空)'} 更新为 {nv}")
+                changes.append(f"{k}：由 {ov or '空'} 更新为 {nv}")
         st.session_state.metrics = ai_metrics
         st.session_state.ai_extracted = True
         st.session_state.metrics_rev += 1
@@ -461,7 +455,6 @@ def _run_diagnosis(edited, s, enterprise_name):
         "营收增长率": s["revenue_growth_rate"],
         "净利润增长率": s["profit_growth_rate"],
         "可提供抵押": s["can_collateral"] == "可提供",
-        "行业周期信号": s["industry_cycle"],
     }
     st.session_state.enterprise_name = enterprise_name
     with st.spinner("正在分析…"):
@@ -539,6 +532,7 @@ def _after_diagnose():
     enterprise = st.session_state.get("enterprise_name") or "默认企业"
     snap = PS.build_snapshot(full, res, st.session_state.get("_upload_name", ""), enterprise)
     comparison = PS.save_enterprise_snapshot(enterprise, snap)
+    st.session_state.trend_result = comparison
 
     summary, risks, suggestions = _parse_llm_sections(st.session_state.get("llm_text"))
     snap_payload = {
@@ -672,10 +666,67 @@ def _render_diagnosis_payload(d):
 
 
 # ---------------- 跨期趋势（助手消息内渲染） ----------------
+def _trend_pct_bars_svg(rows):
+    """手写 SVG 双向条形图：各指标相对上次的 % 变化，绿色=改善、红色=走弱。"""
+    if not rows:
+        return ""
+    n = len(rows)
+    row_h = 26
+    h = 14 + n * row_h + 6
+    bar_x0 = 168
+    bar_max = 452
+    maxabs = max((abs(r["pct"]) for r in rows), default=1) or 1
+    parts = [
+        f'<svg width="100%" viewBox="0 0 680 {h}" '
+        f'xmlns="http://www.w3.org/2000/svg" '
+        f'font-family="Inter, Noto Sans SC, PingFang SC, Microsoft YaHei, sans-serif" '
+        f'font-size="12">',
+        f'<line x1="{bar_x0}" y1="8" x2="{bar_x0}" y2="{h - 4}" '
+        f'stroke="#d0d5dd" stroke-width="1"/>',
+    ]
+    for i, r in enumerate(rows):
+        y = 18 + i * row_h
+        w = max(3.0, abs(r["pct"]) / maxabs * bar_max)
+        col = "#2e7d32" if r["improved"] else "#c62828"
+        parts.append(f'<text x="4" y="{y + 4}" fill="#344054">{r["name"]}</text>')
+        if r["pct"] >= 0:
+            parts.append(
+                f'<rect x="{bar_x0}" y="{y - 7}" width="{w:.1f}" height="14" '
+                f'rx="3" fill="{col}" opacity="0.85"/>')
+            parts.append(
+                f'<text x="{bar_x0 + w + 6:.1f}" y="{y + 4}" fill="{col}">+{r["pct"]}%</text>')
+        else:
+            bx = bar_x0 - w
+            parts.append(
+                f'<rect x="{bx:.1f}" y="{y - 7}" width="{w:.1f}" height="14" '
+                f'rx="3" fill="{col}" opacity="0.85"/>')
+            parts.append(
+                f'<text x="{bx - 6:.1f}" y="{y + 4}" text-anchor="end" '
+                f'fill="{col}">{r["pct"]}%</text>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
 def _render_trend_payload(data):
     verdict = data.get("verdict", "持平")
     vlevel = {"改善": "green", "恶化": "red", "持平": "amber"}.get(verdict, "amber")
     st.markdown(f"**经营与资金健康度演变趋势**　{badge(verdict, vlevel)}")
+
+    # 综合健康评分演变折线（取该企业全部历史快照，每次上传一期）
+    ent = (data.get("current") or {}).get("enterprise") or "默认企业"
+    try:
+        hist = PS.load_enterprise(ent)
+    except Exception:
+        hist = []
+    if len(hist) >= 2:
+        sdf = pd.DataFrame([{
+            "期次": (h.get("ts", "")[:10] or f"第{idx + 1}期"),
+            "综合健康评分": h.get("overall_score", 0),
+        } for idx, h in enumerate(hist)])
+        st.markdown("**综合健康评分演变**（每次上传记为一期）")
+        st.line_chart(sdf.set_index("期次"), use_container_width=True)
+        st.caption("折线为同一企业历次上传的综合健康评分（满分 10），用于观察整体走势。")
+
     rows = data.get("rows", [])
     if rows:
         tdf = pd.DataFrame([{
@@ -683,9 +734,12 @@ def _render_trend_payload(data):
             "变化": r["delta"], "变化%": r["pct"],
             "方向": "改善" if r["improved"] else "走弱",
         } for r in rows])
+        st.markdown("**各指标变化幅度（相对上次）**")
+        st.markdown(_trend_pct_bars_svg(rows), unsafe_allow_html=True)
         st.dataframe(tdf, use_container_width=True, hide_index=True)
     st.markdown(data.get("summary", ""))
-    st.caption("跨期对比基于同一企业历史上传数据自动生成；指标口径以当次上传文件为准。")
+    st.caption("跨期对比基于同一企业历史上传数据自动生成；指标口径以当次上传文件为准。"
+               "绿色表示对经营 / 资金健康有利，红色表示不利。")
 
 
 # ---------------- 产品匹配（助手消息内渲染） ----------------
@@ -832,8 +886,9 @@ def do_report():
                 ai_recommendation=st.session_state.get("ai_rec") or "",
                 rag_citations=rag_cites, rag_asof=rag_asof,
                 ml_proba=ml.get("proba"), ml_conclusion=ml.get("conclusion"),
-                shap_contribs=ml.get("contribs"), gap_result=gap,
-                policy_result=st.session_state.get("policy_result"))
+                shap_contribs=ml.get("contribs"),                  gap_result=gap,
+                 policy_result=st.session_state.get("policy_result"),
+                 trend_result=st.session_state.get("trend_result"))
         add_assistant("诊断报告已生成，点击下方按钮下载：",
                       payload={"type": "report"})
     except Exception as e:
@@ -869,14 +924,15 @@ def _file_qa(question):
         local_hits = []
 
     if st.session_state.get("api_key"):
+        from utils.llm_helper import call_llm
         prompt = (
             "根据以下企业财务资料回答问题，仅基于资料作答；"
             "资料中没有的信息请明确说明无法回答。\n\n"
             f"资料：\n{ctx}\n\n问题：{question.strip()}"
         )
-        ans = gateway().chat("你是财务分析助手，仅基于给定的企业资料作答，语言简洁。",
-                             prompt, model_choice=st.session_state.model,
-                             user_id="fileqa", max_tokens=500)
+        ans = call_llm("你是财务分析助手，仅基于给定的企业资料作答，语言简洁。",
+                       prompt, st.session_state.model, st.session_state.api_key,
+                       max_tokens=500)
         return ans if ans else None
 
     if local_hits:
@@ -894,6 +950,7 @@ def do_qa(question):
 
     try:
         from utils.vector_store import retrieve, grounded_answer
+        from utils.llm_helper import call_llm as rag_call_llm
         rag_index, rag_meta = _load_rag_index()
     except Exception as e:
         add_assistant(f"问答模块不可用：{e}")
@@ -908,10 +965,10 @@ def do_qa(question):
     use_mock = not st.session_state.get("api_key")
 
     def _rag_llm(prompt, temperature=0):
-        return gateway().chat(
+        return rag_call_llm(
             "你是小微金融政策与银行产品问答助手，仅基于给定资料回答。",
-            prompt, model_choice=st.session_state.model,
-            user_id="rag", temperature=temperature, max_tokens=600)
+            prompt, st.session_state.model, st.session_state.api_key,
+            temperature=temperature, max_tokens=600)
 
     with st.spinner("检索中…" if use_mock else "检索与生成中…"):
         ans = grounded_answer(None if use_mock else _rag_llm, q, hits,
@@ -1013,7 +1070,7 @@ def _render_confirm_panel():
         with a3:
             ar_over_12m = st.number_input("超过 12 个月", 0, 100, 10)
 
-        with st.expander("高级选项（信用评级、增长率、行业周期信号、企业名称）"):
+        with st.expander("高级选项（信用评级、增长率、担保与征信、企业名称）"):
             g1, g2, g3 = st.columns(3)
             with g1:
                 tax_credit_rating = st.selectbox("纳税信用评级",
@@ -1028,13 +1085,8 @@ def _render_confirm_panel():
             with g3:
                 court_execution = st.selectbox("法院执行/诉讼记录", ["无", "有"])
                 financing_institution_count = st.number_input("融资机构数量", 0, 10, 1, 1)
-            g4, g5 = st.columns(2)
-            with g4:
-                can_collateral = st.selectbox(
-                    "是否可提供抵押/担保", ["可提供", "暂无法提供"])
-            with g5:
-                industry_cycle = st.slider(
-                    "行业周期信号（外部输入）", -1.0, 1.0, 0.0, 0.1)
+            can_collateral = st.selectbox(
+                "是否可提供抵押/担保", ["可提供", "暂无法提供"])
             enterprise_name = st.text_input(
                 "企业名称（用于跨期对比，选填）",
                 value=st.session_state.get("enterprise_name", "默认企业"))
@@ -1058,7 +1110,6 @@ def _render_confirm_panel():
             "revenue_growth_rate": revenue_growth_rate,
             "profit_growth_rate": profit_growth_rate,
             "can_collateral": can_collateral,
-            "industry_cycle": industry_cycle,
         }, enterprise_name)
         _after_diagnose()
         st.rerun()
